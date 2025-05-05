@@ -138,12 +138,22 @@ def apply_rubins_rules_correlations(corrs_list, se_list, n):
         return np.nan, np.nan, np.nan
 
 # Function to generate sample write-up for correlation matrix
-def generate_correlation_matrix_write_up(selected_labels, selected_codes, corr_matrix, p_matrix, used_brr, num_pvs):
-    write_up = (
-        f"A weighted correlation matrix analysis {'using BRR standard errors' if used_brr else 'using a simple method'} "
-        f"was conducted on {len(selected_labels)} variables, using {num_pvs} plausible values combined via Rubin's rules "
-        f"where applicable. The variables analyzed were: {', '.join([f'{label} ({code})' for label, code in zip(selected_labels, selected_codes)])}.\n\n"
-    )
+def generate_correlation_matrix_write_up(selected_labels, selected_codes, corr_matrix, p_matrix, used_brr, max_pvs):
+    method_note = "using BRR standard errors" if used_brr else "using a simple method"
+    
+    # Conditionally include PV mention based on max_pvs
+    if max_pvs == 1:
+        write_up = (
+            f"A weighted correlation matrix analysis {method_note} "
+            f"was conducted on {len(selected_labels)} variables. "
+            f"The variables analyzed were: {', '.join([f'{label} ({code})' for label, code in zip(selected_labels, selected_codes)])}.\n\n"
+        )
+    else:
+        write_up = (
+            f"A weighted correlation matrix analysis {method_note} "
+            f"was conducted on {len(selected_labels)} variables, using {max_pvs} plausible values combined via Rubin's rules "
+            f"where applicable. The variables analyzed were: {', '.join([f'{label} ({code})' for label, code in zip(selected_labels, selected_codes)])}.\n\n"
+        )
     
     significant_pairs = []
     for i in range(len(selected_labels)):
@@ -152,8 +162,8 @@ def generate_correlation_matrix_write_up(selected_labels, selected_codes, corr_m
             p_value = p_matrix[i, j]
             if np.isnan(p_value) or p_value >= 0.05:
                 continue
-            corr_display = f"{corr:.3f}"
-            p_display = "< .001" if p_value < 0.001 else f"= {p_value:.3f}"
+            corr_display = f"{corr:.3f}" if not np.isnan(corr) else "N/A"
+            p_display = "< .001" if p_value < 0.001 else f"= {p_value:.3f}" if not np.isnan(p_value) else "N/A"
             significant_pairs.append(
                 f"{selected_labels[i]} ({selected_codes[i]}) and {selected_labels[j]} ({selected_codes[j]}) "
                 f"showed a significant correlation of {corr_display} (p {p_display})"
@@ -375,8 +385,11 @@ else:
         escs_label = variable_labels.get("ESCS", "ESCS")
         if escs_label in seen_labels and escs_label in all_var_options:
             default_vars.append(escs_label)
-        elif all_var_options:
-            default_vars.append(all_var_options[0])
+        elif all_var_options and len(all_var_options) > 1:
+            default_vars.append(all_var_options[1 if "Mathematics score" in all_var_options else 0])
+        
+        if len(default_vars) < 2 and len(all_var_options) >= 2:
+            default_vars = all_var_options[:2]  # Ensure at least two variables are selected by default
         
         selected_var_labels = st.multiselect(
             "Variables",
@@ -388,17 +401,22 @@ else:
         # Split selected variables into domains and regular variables
         selected_domains = []
         selected_vars = []
+        selected_labels = []
+        selected_codes = []
+        all_vars = []
+        
         for label in selected_var_labels:
             if label in label_to_domain:
                 domain = label_to_domain[label]
                 selected_domains.append(domain)
+                selected_labels.append(domain_to_label.get(domain, domain))
+                selected_codes.append(domain)
+                all_vars.append(pv_domains[domain])
             else:
                 selected_vars.append(label_to_var[label])
-        
-        # Combine selected variables and domains
-        all_selected_labels = [label for label in selected_var_labels if label not in label_to_domain]
-        for domain in selected_domains:
-            all_selected_labels.append(domain_to_label.get(domain, domain))
+                selected_labels.append(label)
+                selected_codes.append(label_to_var[label])
+                all_vars.append([label_to_var[label]])
         
         run_analysis = st.button("Run Analysis", key="run_correlation_matrix")
         
@@ -422,109 +440,107 @@ else:
                     missing_weights = [col for col in replicate_weight_cols if col not in df.columns]
                     st.session_state.correlation_matrix_used_brr = len(missing_weights) == 0  # Use BRR if no replicate weights are missing
                     
-                    # Prepare columns for data filtering
-                    columns = ['W_FSTUWT']
-                    if st.session_state.correlation_matrix_used_brr:
-                        columns += replicate_weight_cols
-                    for domain in selected_domains:
-                        columns.extend(pv_domains[domain])
-                    columns.extend(selected_vars)
+                    # Initialize correlation and p-value matrices
+                    n_vars = len(selected_var_labels)
+                    corr_matrix = np.ones((n_vars, n_vars))
+                    p_matrix = np.zeros((n_vars, n_vars))
                     
-                    corr_data = df[columns].dropna()
-                    if len(corr_data) < 2:
-                        st.warning("Insufficient non-missing data for correlation matrix analysis.")
-                        st.session_state.correlation_matrix_completed = False
-                        st.session_state.correlation_matrix_show_write_up = False
-                        st.session_state.correlation_matrix_write_up_content = None
-                        st.session_state.correlation_matrix_used_brr = False
-                    else:
-                        st.write(f"Dataset size after dropping NA: {len(corr_data)} rows")
-                        # Determine the number of variables (including domains)
-                        selected_codes = []
-                        all_vars = []
-                        for label in selected_var_labels:
-                            if label in label_to_domain:
-                                domain = label_to_domain[label]
-                                selected_codes.append(domain)
-                                all_vars.append(pv_domains[domain])
-                            else:
-                                selected_codes.append(label_to_var[label])
-                                all_vars.append([label_to_var[label]])
-                        
-                        # Compute the maximum number of plausible values
-                        max_pvs = max([len(vars) for vars in all_vars])
-                        
-                        # Initialize correlation and p-value matrices
-                        n_vars = len(selected_var_labels)
-                        corr_matrix = np.ones((n_vars, n_vars))
-                        p_matrix = np.zeros((n_vars, n_vars))
-                        
-                        # Progress bar for PV iterations
-                        pv_progress = st.progress(0)
-                        total_iterations = (n_vars * (n_vars - 1)) // 2 * max_pvs
-                        iteration_count = 0
-                        
-                        # Compute correlations for each pair of variables
-                        for i in range(n_vars):
-                            for j in range(i + 1, n_vars):
-                                var1_list = all_vars[i]
-                                var2_list = all_vars[j]
-                                var1_is_pv = len(var1_list) > 1
-                                var2_is_pv = len(var2_list) > 1
-                                num_pvs = max(len(var1_list), len(var2_list))
+                    # Compute the maximum number of plausible values
+                    max_pvs = max([len(vars) for vars in all_vars])
+                    
+                    # Progress bar for PV iterations
+                    pv_progress = st.progress(0)
+                    total_iterations = (n_vars * (n_vars - 1)) // 2 * max_pvs
+                    iteration_count = 0
+                    
+                    # Compute correlations for each pair of variables
+                    for i in range(n_vars):
+                        for j in range(i + 1, n_vars):
+                            var1_list = all_vars[i]
+                            var2_list = all_vars[j]
+                            var1_is_pv = len(var1_list) > 1
+                            var2_is_pv = len(var2_list) > 1
+                            num_pvs = max(len(var1_list), len(var2_list))
+                            
+                            all_corrs = []
+                            all_p_values = []  # Store p-values directly
+                            all_se = []
+                            
+                            for pv_idx in range(num_pvs):
+                                var1 = var1_list[pv_idx % len(var1_list)]
+                                var2 = var2_list[pv_idx % len(var2_list)]
+                                st.write(f"Processing correlation between {var1} and {var2}...")
                                 
-                                all_corrs = []
-                                all_se = []
+                                # Create a subset DataFrame for just this pair to ensure consistent NA handling
+                                pair_columns = ['W_FSTUWT']
+                                if st.session_state.correlation_matrix_used_brr:
+                                    pair_columns += replicate_weight_cols
+                                pair_columns.append(var1)
+                                pair_columns.append(var2)
+                                pair_data = df[pair_columns].dropna()
                                 
-                                for pv_idx in range(num_pvs):
-                                    var1 = var1_list[pv_idx % len(var1_list)]
-                                    var2 = var2_list[pv_idx % len(var2_list)]
-                                    st.write(f"Processing correlation between {var1} and {var2}...")
-                                    
-                                    x = corr_data[var1].values
-                                    y = corr_data[var2].values
-                                    w = corr_data['W_FSTUWT'].values
-                                    corr, p_value = weighted_correlation(x, y, w)
-                                    if st.session_state.correlation_matrix_used_brr:
-                                        st.write("Calculating standard error using replicate weights...")
-                                        brr_progress = st.progress(0)
-                                        se = compute_brr_se_correlation(x, y, replicate_weight_cols, corr_data, brr_progress)
-                                        p_value = compute_brr_p_value(corr, se, len(corr_data))
-                                    else:
-                                        se = np.nan  # Not used in simple method
-                                    
-                                    all_corrs.append(corr)
-                                    all_se.append(se)
-                                    
+                                if len(pair_data) < 2:
+                                    st.warning(f"Insufficient non-missing data for correlation between {var1} and {var2} (at least 2 observations required after dropping missing values).")
+                                    all_corrs.append(np.nan)
+                                    all_p_values.append(np.nan)
+                                    all_se.append(np.nan)
                                     iteration_count += 1
                                     pv_progress.progress(iteration_count / total_iterations)
-                        
-                                # Combine results using Rubin's rules
-                                st.write(f"Combining results for {all_selected_labels[i]} and {all_selected_labels[j]}...")
-                                combined_corr, combined_se, combined_p_value = apply_rubins_rules_correlations(all_corrs, all_se, len(corr_data))
+                                    continue
                                 
-                                # Store in matrices
-                                corr_matrix[i, j] = combined_corr
-                                corr_matrix[j, i] = combined_corr
-                                p_matrix[i, j] = combined_p_value
-                                p_matrix[j, i] = combined_p_value
+                                x = pair_data[var1].values
+                                y = pair_data[var2].values
+                                w = pair_data['W_FSTUWT'].values
+                                corr, p_value = weighted_correlation(x, y, w)
+                                if st.session_state.correlation_matrix_used_brr:
+                                    st.write("Calculating standard error using replicate weights...")
+                                    brr_progress = st.progress(0)
+                                    se = compute_brr_se_correlation(x, y, replicate_weight_cols, pair_data, brr_progress)
+                                    p_value = compute_brr_p_value(corr, se, len(pair_data))
+                                else:
+                                    se = np.nan  # Not used in simple method
+                                
+                                all_corrs.append(corr)
+                                all_p_values.append(p_value)
+                                all_se.append(se)
+                                
+                                iteration_count += 1
+                                pv_progress.progress(iteration_count / total_iterations)
                         
-                        # Store results in session state
-                        st.session_state.correlation_matrix_results = {
-                            'labels': all_selected_labels,
-                            'codes': selected_codes,
-                            'corr_matrix': corr_matrix,
-                            'p_matrix': p_matrix
-                        }
-                        st.session_state.correlation_matrix_completed = True
-                        st.session_state.correlation_matrix_show_write_up = False
-                        st.session_state.correlation_matrix_write_up_content = None
-                        
-                        # Render the correlation matrix
-                        st.write("Rendering correlation matrix...")
-                        table_html = render_correlation_matrix(all_selected_labels, corr_matrix, p_matrix)
-                        components.html(table_html, height=400, scrolling=True)
-                        st.write("Correlation matrix analysis completed.")
+                            # Combine results
+                            if num_pvs == 1:
+                                # For non-PV variables, use the single correlation and p-value directly
+                                st.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]} (single iteration, no plausible values)...")
+                                combined_corr = all_corrs[0]
+                                combined_p_value = all_p_values[0]
+                                combined_se = all_se[0]
+                            else:
+                                # For PV variables, apply Rubin's rules
+                                st.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]}...")
+                                combined_corr, combined_se, combined_p_value = apply_rubins_rules_correlations(all_corrs, all_se, len(pair_data))
+                            
+                            # Store in matrices
+                            corr_matrix[i, j] = combined_corr
+                            corr_matrix[j, i] = combined_corr
+                            p_matrix[i, j] = combined_p_value
+                            p_matrix[j, i] = combined_p_value
+                    
+                    # Store results in session state
+                    st.session_state.correlation_matrix_results = {
+                        'labels': selected_labels,
+                        'codes': selected_codes,
+                        'corr_matrix': corr_matrix,
+                        'p_matrix': p_matrix
+                    }
+                    st.session_state.correlation_matrix_completed = True
+                    st.session_state.correlation_matrix_show_write_up = False
+                    st.session_state.correlation_matrix_write_up_content = None
+                    
+                    # Render the correlation matrix
+                    st.write("Rendering correlation matrix...")
+                    table_html = render_correlation_matrix(selected_labels, corr_matrix, p_matrix)
+                    components.html(table_html, height=400, scrolling=True)
+                    st.write("Correlation matrix analysis completed.")
             except Exception as e:
                 st.error(f"Error computing correlation matrix: {str(e)}")
                 st.session_state.correlation_matrix_completed = False
@@ -554,14 +570,14 @@ else:
                 st.session_state.correlation_matrix_results is not None):
                 if st.button("Generate Write-Up", key="writeup_correlation_matrix"):
                     results = st.session_state.correlation_matrix_results
-                    num_pvs = max([len(pv_domains[label_to_domain[label]]) if label in label_to_domain else 1 for label in selected_var_labels])
+                    max_pvs = max([len(pv_domains[label_to_domain[label]]) if label in label_to_domain else 1 for label in selected_var_labels])
                     write_up = generate_correlation_matrix_write_up(
                         results['labels'],
                         results['codes'],
                         results['corr_matrix'],
                         results['p_matrix'],
                         st.session_state.correlation_matrix_used_brr,
-                        num_pvs
+                        max_pvs
                     )
                     st.session_state.correlation_matrix_show_write_up = True
                     st.session_state.correlation_matrix_write_up_content = write_up
