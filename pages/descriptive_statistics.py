@@ -375,7 +375,7 @@ def create_word_table(stats):
     
     # Create table
     table = doc.add_table(rows=1 + len(stats), cols=15)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
     table.style = 'Normal Table'  # Use a style with no borders
     
     # Set column widths

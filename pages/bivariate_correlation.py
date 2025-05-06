@@ -4,6 +4,14 @@ import numpy as np
 import re
 import streamlit.components.v1 as components
 from scipy.stats import t
+from io import BytesIO
+from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_ORIENT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 # Streamlit app configuration
 st.set_page_config(page_title="Bivariate Correlation - PISA Data Exploration Tool", layout="wide")
@@ -137,28 +145,8 @@ def apply_rubins_rules_correlations(corrs_list, se_list, n):
         st.error(f"Error in apply_rubins_rules_correlations: {str(e)}")
         return np.nan, np.nan, np.nan
 
-# Function to generate sample write-up for correlation
-def generate_correlation_write_up(var1_label, var1_code, var2_label, var2_code, corr, p_value, used_brr, num_pvs):
-    corr_display = f"{corr:.3f}" if not np.isnan(corr) else "N/A"
-    p_display = "< .001" if p_value < 0.001 else f"= {p_value:.3f}" if not np.isnan(p_value) else "N/A"
-    method_note = "using BRR standard errors" if used_brr else "using a simple method"
-    
-    # Conditionally include PV mention based on num_pvs
-    if num_pvs == 1:
-        write_up = (
-            f"A weighted correlation analysis {method_note} was conducted between {var1_label} ({var1_code}) and "
-            f"{var2_label} ({var2_code}). The correlation coefficient was {corr_display}, with a p-value {p_display}."
-        )
-    else:
-        write_up = (
-            f"A weighted correlation analysis {method_note} was conducted between {var1_label} ({var1_code}) and "
-            f"{var2_label} ({var2_code}), using {num_pvs} plausible values combined via Rubin's rules. "
-            f"The correlation coefficient was {corr_display}, with a p-value {p_display}."
-        )
-    return write_up
-
-# Function to render correlation results as HTML table
-def render_correlation_table(var1_label, var1_code, var2_label, var2_code, corr, p_value):
+# Function to render correlation table as HTML
+def render_correlation_table(selected_labels, selected_codes, results):
     html_content = """
     <style>
     .corr-table-container {
@@ -185,6 +173,7 @@ def render_correlation_table(var1_label, var1_code, var2_label, var2_code, corr,
         border: none;
         padding: 8px;
         box-sizing: border-box;
+        text-align: center;
     }
     .corr-table th:first-child, .corr-table td:first-child {
         width: 200px !important;
@@ -194,7 +183,6 @@ def render_correlation_table(var1_label, var1_code, var2_label, var2_code, corr,
     }
     .corr-table th:not(:first-child), .corr-table td:not(:first-child) {
         width: 100px !important;
-        text-align: center;
     }
     .corr-table tr:nth-child(even) {
         background-color: #f9f9f9;
@@ -221,29 +209,142 @@ def render_correlation_table(var1_label, var1_code, var2_label, var2_code, corr,
     </style>
     <div class="corr-table-container">
         <div class="corr-table-title">Table 1</div>
-        <div class="corr-table-subtitle">Correlation Between {{var1_label}} and {{var2_label}}</div>
+        <div class="corr-table-subtitle">Weighted Bivariate Correlations Between Selected Variables</div>
         <table class="corr-table">
             <tr class="corr-table-header">
-                <th>Variable Pair</th>
+                <th>Variable 1</th>
+                <th>Variable 2</th>
                 <th>Correlation</th>
-                <th>p-value</th>
-                <th>Significance</th>
+                <th>P-value</th>
+                <th>Standard Error</th>
             </tr>
-            <tr class="corr-table-last-row">
-                <th>{{var1_label}} and {{var2_label}}</th>
-                <td>{{corr_display}}</td>
-                <td>{{p_display}}</td>
-                <td>{{sig_display}}</td>
-            </tr>
+            {{data_rows}}
         </table>
     </div>
     """
-    corr_display = f"{corr:.3f}" if not np.isnan(corr) else "-"
-    p_display = "< .001" if p_value < 0.001 else f"{p_value:.3f}" if not np.isnan(p_value) else "-"
-    sig_display = "**" if p_value < 0.01 else "*" if p_value < 0.05 else "" if not np.isnan(p_value) else "-"
+    data_rows = ""
+    for idx, (var1_label, var2_label, corr, p_value, se) in enumerate(results):
+        corr_display = f"{corr:.3f}" if not np.isnan(corr) else "-"
+        p_display = "< .001" if p_value < 0.001 else f"= {p_value:.3f}" if not np.isnan(p_value) else "-"
+        se_display = f"{se:.3f}" if not np.isnan(se) else "-"
+        sig_display = "**" if p_value < 0.01 else "*" if p_value < 0.05 else "" if not np.isnan(p_value) else ""
+        row_class = "corr-table-last-row" if idx == len(results) - 1 else ""
+        row = f"""
+        <tr class="{row_class}">
+            <th>{var1_label}</th>
+            <th>{var2_label}</th>
+            <td>{corr_display}{sig_display}</td>
+            <td>{p_display}</td>
+            <td>{se_display}</td>
+        </tr>
+        """
+        data_rows += row
     
-    full_html = html_content.replace("{{var1_label}}", var1_label).replace("{{var2_label}}", var2_label).replace("{{corr_display}}", corr_display).replace("{{p_display}}", p_display).replace("{{sig_display}}", sig_display)
+    full_html = html_content.replace("{{data_rows}}", data_rows)
     return full_html
+
+# Function to set cell borders in Word document
+def set_cell_border(cell, top=False, bottom=False, left=False, right=False):
+    tc = cell._element
+    tcPr = tc.get_or_add_tcPr()
+    
+    # Remove existing borders
+    for border in ['top', 'bottom', 'left', 'right']:
+        existing_border = tcPr.find(qn(f'w:{border}'))
+        if existing_border is not None:
+            tcPr.remove(existing_border)
+    
+    # Set new borders where specified
+    if top:
+        border = OxmlElement('w:top')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')  # Border width in eighths of a point
+        tcPr.append(border)
+    if bottom:
+        border = OxmlElement('w:bottom')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')
+        tcPr.append(border)
+    if left:
+        border = OxmlElement('w:left')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')
+        tcPr.append(border)
+    if right:
+        border = OxmlElement('w:right')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')
+        tcPr.append(border)
+
+# Function to create a Word document with the APA-style table
+def create_word_table(results):
+    doc = Document()
+    
+    # Set document to landscape orientation
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width = Inches(11)
+    section.page_height = Inches(8.5)
+    
+    # Add title
+    title = doc.add_paragraph("Table 1")
+    title.runs[0].bold = True
+    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    title.runs[0].font.name = 'Times New Roman'
+    title.runs[0].font.size = Pt(10)
+    
+    # Add subtitle
+    subtitle = doc.add_paragraph("Weighted Bivariate Correlations Between Selected Variables")
+    subtitle.runs[0].italic = True
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    subtitle.runs[0].font.name = 'Times New Roman'
+    subtitle.runs[0].font.size = Pt(10)
+    
+    # Create table
+    table = doc.add_table(rows=1 + len(results), cols=5)
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.style = 'Normal Table'  # Use a style with no borders
+    
+    # Set column widths
+    for column in table.columns:
+        for cell in column.cells:
+            cell.width = Inches(1.5)  # Adjusted for landscape orientation
+    
+    # Add header row
+    headers = ["Variable 1", "Variable 2", "Correlation", "P-value", "Standard Error"]
+    for idx, header in enumerate(headers):
+        cell = table.rows[0].cells[idx]
+        cell.text = header
+        cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
+        cell.paragraphs[0].runs[0].font.size = Pt(10)
+        cell.paragraphs[0].runs[0].bold = True
+        set_cell_border(cell, top=True, bottom=True)
+    
+    # Add data rows
+    for idx, (var1_label, var2_label, corr, p_value, se) in enumerate(results):
+        row = table.rows[idx + 1]
+        row.cells[0].text = var1_label
+        row.cells[1].text = var2_label
+        corr_display = f"{corr:.3f}" if not np.isnan(corr) else "-"
+        p_display = "< .001" if p_value < 0.001 else f"= {p_value:.3f}" if not np.isnan(p_value) else "-"
+        se_display = f"{se:.3f}" if not np.isnan(se) else "-"
+        sig_display = "**" if p_value < 0.01 else "*" if p_value < 0.05 else "" if not np.isnan(p_value) else ""
+        row.cells[2].text = f"{corr_display}{sig_display}"
+        row.cells[3].text = p_display
+        row.cells[4].text = se_display
+        for cell in row.cells:
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
+            cell.paragraphs[0].runs[0].font.size = Pt(10)
+            if idx == len(results) - 1:
+                set_cell_border(cell, bottom=True)
+    
+    # Save document to a BytesIO buffer
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 # Access data from session state
 df = st.session_state.get('df', None)
@@ -252,20 +353,12 @@ value_labels = st.session_state.get('value_labels', {})
 visible_columns = st.session_state.get('visible_columns', [])
 
 # Initialize session state for this page
-if 'correlation_results' not in st.session_state:
-    st.session_state.correlation_results = None
-if 'correlation_completed' not in st.session_state:
-    st.session_state.correlation_completed = False
-if 'correlation_show_write_up' not in st.session_state:
-    st.session_state.correlation_show_write_up = False
-if 'correlation_write_up_content' not in st.session_state:
-    st.session_state.correlation_write_up_content = None
-if 'correlation_var1' not in st.session_state:
-    st.session_state.correlation_var1 = None
-if 'correlation_var2' not in st.session_state:
-    st.session_state.correlation_var2 = None
-if 'correlation_used_brr' not in st.session_state:
-    st.session_state.correlation_used_brr = False
+if 'bivariate_results' not in st.session_state:
+    st.session_state.bivariate_results = None
+if 'bivariate_completed' not in st.session_state:
+    st.session_state.bivariate_completed = False
+if 'bivariate_selected_codes' not in st.session_state:
+    st.session_state.bivariate_selected_codes = None
 
 # Streamlit UI
 st.title("Bivariate Correlation Analysis")
@@ -345,248 +438,184 @@ else:
         label_to_var[unique_label] = col
     
     if len(unique_var_labels) + len(domain_options) < 2:
-        st.warning("At least two numeric variables or domains are required for correlation analysis.")
+        st.warning("At least two numeric variables or domains are required for bivariate correlation analysis.")
     else:
-        # Select Variable 1 (default to MATH domain)
-        st.write("Select first variable (domain or numeric variable):")
+        # Select Variables (default to MATH domain and ESCS)
+        st.write("Select variables for bivariate correlation (default: Mathematics score, ESCS):")
         all_var_options = domain_options + unique_var_labels
-        default_var1_label = "Mathematics score"
-        if default_var1_label not in all_var_options:
-            st.warning(f"Default first variable '{default_var1_label}' not found in available options: {all_var_options}. Falling back to first variable.")
-            default_index1 = 0
-        else:
-            default_index1 = all_var_options.index(default_var1_label)
+        default_vars = []
+        if "Mathematics score" in all_var_options:
+            default_vars.append("Mathematics score")
+        escs_label = variable_labels.get("ESCS", "ESCS")
+        if escs_label in seen_labels and escs_label in all_var_options:
+            default_vars.append(escs_label)
+        elif all_var_options and len(all_var_options) > 1:
+            default_vars.append(all_var_options[1 if "Mathematics score" in all_var_options else 0])
         
-        var1_label = st.selectbox(
-            "Variable 1",
+        if len(default_vars) < 2 and len(all_var_options) >= 2:
+            default_vars = all_var_options[:2]
+        
+        selected_var_labels = st.multiselect(
+            "Variables",
             all_var_options,
-            index=default_index1,
-            key="var1"
+            default=default_vars,
+            key="bivariate_vars"
         )
         
-        # Determine if Variable 1 is a domain or a regular variable
-        if var1_label in label_to_domain:
-            var1_domain = label_to_domain[var1_label]
-            var1_vars = pv_domains[var1_domain]
-            var1_is_pv = True
-        else:
-            var1_vars = [label_to_var[var1_label]]
-            var1_is_pv = False
-        
-        # Select Variable 2 (default to ESCS)
-        st.write("Select second variable (default: ESCS):")
-        var2_options = [label for label in all_var_options if label != var1_label]
-        default_var2_label = variable_labels.get("ESCS", "ESCS")
-        if default_var2_label in seen_labels and default_var2_label in var2_options:
-            default_index2 = var2_options.index(default_var2_label)
-        else:
-            default_index2 = 0 if var2_options else None
-        
-        if not var2_options:
-            st.warning("No second variable available to select. Please ensure there are at least two variables in the dataset.")
-        else:
-            var2_label = st.selectbox(
-                "Variable 2",
-                var2_options,
-                index=default_index2,
-                key="var2"
-            )
-            
-            # Determine if Variable 2 is a domain or a regular variable
-            if var2_label in label_to_domain:
-                var2_domain = label_to_domain[var2_label]
-                var2_vars = pv_domains[var2_domain]
-                var2_is_pv = True
+        # Split selected variables into domains and regular variables
+        selected_domains = []
+        selected_vars = []
+        selected_codes = []
+        all_vars = []
+        for label in selected_var_labels:
+            if label in label_to_domain:
+                domain = label_to_domain[label]
+                selected_domains.append(domain)
+                selected_codes.append(domain)
+                all_vars.append(pv_domains[domain])
             else:
-                var2_vars = [label_to_var[var2_label]]
-                var2_is_pv = False
-            
-            run_analysis = st.button("Run Analysis", key="run_correlation")
-            
-            # Update session state with selections
-            if (var1_label != st.session_state.correlation_var1 or 
-                var2_label != st.session_state.correlation_var2):
-                st.session_state.correlation_var1 = var1_label
-                st.session_state.correlation_var2 = var2_label
-                if not run_analysis:  # Only reset if not running analysis
-                    st.session_state.correlation_results = None
-                    st.session_state.correlation_completed = False
-                    st.session_state.correlation_show_write_up = False
-                    st.session_state.correlation_write_up_content = None
-                    st.session_state.correlation_used_brr = False
-            
-            if run_analysis and var1_vars and var2_vars:
-                try:
-                    if 'W_FSTUWT' not in df.columns:
-                        st.error("Final student weight (W_FSTUWT) not found in the dataset.")
-                    else:
-                        # Check for replicate weights availability
-                        replicate_weight_cols = [f"W_FSTURWT{i}" for i in range(1, 81)]
-                        missing_weights = [col for col in replicate_weight_cols if col not in df.columns]
-                        st.session_state.correlation_used_brr = len(missing_weights) == 0  # Use BRR if no replicate weights are missing
-                        
-                        # Prepare columns for data filtering
-                        columns = ['W_FSTUWT']
-                        if st.session_state.correlation_used_brr:
-                            columns += replicate_weight_cols
-                        if var1_is_pv:
-                            columns.extend(var1_vars)
-                        else:
-                            columns.append(var1_vars[0])
-                        if var2_is_pv:
-                            columns.extend(var2_vars)
-                        else:
-                            columns.append(var2_vars[0])
-                        
-                        corr_data = df[columns].dropna()
-                        if len(corr_data) < 2:
-                            st.warning("Insufficient non-missing data for correlation analysis (at least 2 observations required after dropping missing values).")
-                            st.session_state.correlation_completed = False
-                            st.session_state.correlation_show_write_up = False
-                            st.session_state.correlation_write_up_content = None
-                            st.session_state.correlation_used_brr = False
-                        else:
-                            st.write(f"Dataset size after dropping NA: {len(corr_data)} rows")
-                            num_pvs = max(len(var1_vars) if var1_is_pv else 1, len(var2_vars) if var2_is_pv else 1)
+                selected_vars.append(label_to_var[label])
+                selected_codes.append(label_to_var[label])
+                all_vars.append([label_to_var[label]])
+        
+        run_analysis = st.button("Run Analysis", key="run_bivariate")
+        
+        if run_analysis and (selected_vars or selected_domains) and len(selected_var_labels) >= 2:
+            try:
+                if 'W_FSTUWT' not in df.columns:
+                    st.error("Final student weight (W_FSTUWT) not found in the dataset.")
+                else:
+                    # Check for replicate weights availability
+                    replicate_weight_cols = [f"W_FSTURWT{i}" for i in range(1, 81)]
+                    missing_weights = [col for col in replicate_weight_cols if col not in df.columns]
+                    use_brr = len(missing_weights) == 0
+                    
+                    # Compute the maximum number of plausible values
+                    max_pvs = max([len(vars) for vars in all_vars])
+                    
+                    # Progress bar for PV iterations
+                    pv_progress = st.progress(0)
+                    total_iterations = (len(all_vars) * (len(all_vars) - 1)) // 2 * max_pvs
+                    iteration_count = 0
+                    
+                    # Compute correlations for each pair of variables
+                    results = []
+                    for i in range(len(all_vars)):
+                        for j in range(i + 1, len(all_vars)):
+                            var1_list = all_vars[i]
+                            var2_list = all_vars[j]
+                            var1_is_pv = len(var1_list) > 1
+                            var2_is_pv = len(var2_list) > 1
+                            num_pvs = max(len(var1_list), len(var2_list))
                             
-                            # Prepare lists to store results across PV combinations
                             all_corrs = []
-                            all_p_values = []  # Store p-values directly
+                            all_p_values = []
                             all_se = []
                             
-                            # Progress bar for PV iterations
-                            pv_progress = st.progress(0)
-                            total_pv_iterations = num_pvs * num_pvs if var1_is_pv and var2_is_pv else num_pvs
-                            iteration_count = 0
-                            
-                            # Iterate over all PV combinations
-                            for pv1_idx in range(len(var1_vars) if var1_is_pv else 1):
-                                pv1_num = pv1_idx + 1
-                                x_var = var1_vars[pv1_idx] if var1_is_pv else var1_vars[0]
-                                for pv2_idx in range(len(var2_vars) if var2_is_pv else 1):
-                                    pv2_num = pv2_idx + 1
-                                    y_var = var2_vars[pv2_idx] if var2_is_pv else var2_vars[0]
-                                    st.write(f"Processing correlation between {x_var} and {y_var}...")
-                                    
-                                    # Compute correlation
-                                    x = corr_data[x_var].values
-                                    y = corr_data[y_var].values
-                                    w = corr_data['W_FSTUWT'].values
-                                    corr, p_value = weighted_correlation(x, y, w)
-                                    if st.session_state.correlation_used_brr:
-                                        st.write("Calculating standard error using replicate weights...")
-                                        brr_progress = st.progress(0)
-                                        se = compute_brr_se_correlation(x, y, replicate_weight_cols, corr_data, brr_progress)
-                                        p_value = compute_brr_p_value(corr, se, len(corr_data))
-                                    else:
-                                        se = np.nan  # Not used in simple method
-                                    
-                                    # Store results
-                                    all_corrs.append(corr)
-                                    all_p_values.append(p_value)
-                                    all_se.append(se)
-                                    
-                                    # Update progress
+                            for pv_idx in range(num_pvs):
+                                var1 = var1_list[pv_idx % len(var1_list)]
+                                var2 = var2_list[pv_idx % len(var2_list)]
+                                st.write(f"Processing correlation between {var1} and {var2}...")
+                                
+                                # Create a subset DataFrame for just this pair
+                                pair_columns = ['W_FSTUWT']
+                                if use_brr:
+                                    pair_columns += replicate_weight_cols
+                                pair_columns.append(var1)
+                                pair_columns.append(var2)
+                                pair_data = df[pair_columns].dropna()
+                                
+                                if len(pair_data) < 2:
+                                    st.warning(f"Insufficient non-missing data for correlation between {var1} and {var2}.")
+                                    all_corrs.append(np.nan)
+                                    all_p_values.append(np.nan)
+                                    all_se.append(np.nan)
                                     iteration_count += 1
-                                    pv_progress.progress(iteration_count / total_pv_iterations)
-                            
+                                    pv_progress.progress(iteration_count / total_iterations)
+                                    continue
+                                
+                                x = pair_data[var1].values
+                                y = pair_data[var2].values
+                                w = pair_data['W_FSTUWT'].values
+                                corr, p_value = weighted_correlation(x, y, w)
+                                if use_brr:
+                                    st.write("Calculating standard error using replicate weights...")
+                                    brr_progress = st.progress(0)
+                                    se = compute_brr_se_correlation(x, y, replicate_weight_cols, pair_data, brr_progress)
+                                    p_value = compute_brr_p_value(corr, se, len(pair_data))
+                                else:
+                                    se = np.nan
+                                
+                                all_corrs.append(corr)
+                                all_p_values.append(p_value)
+                                all_se.append(se)
+                                
+                                iteration_count += 1
+                                pv_progress.progress(iteration_count / total_iterations)
+                        
                             # Combine results
                             if num_pvs == 1:
-                                # For non-PV variables, use the single correlation and p-value directly
-                                st.write("Combining results (single iteration, no plausible values)...")
+                                st.write(f"Combining results for {selected_var_labels[i]} and {selected_var_labels[j]} (single iteration, no plausible values)...")
                                 combined_corr = all_corrs[0]
                                 combined_p_value = all_p_values[0]
                                 combined_se = all_se[0]
                             else:
-                                # For PV variables, apply Rubin's rules
-                                st.write("Combining results across plausible values using Rubin's rules...")
-                                combined_corr, combined_se, combined_p_value = apply_rubins_rules_correlations(all_corrs, all_se, len(corr_data))
+                                st.write(f"Combining results for {selected_var_labels[i]} and {selected_var_labels[j]}...")
+                                combined_corr, combined_se, combined_p_value = apply_rubins_rules_correlations(all_corrs, all_se, len(pair_data))
                             
-                            # Store results in session state
-                            st.session_state.correlation_results = {
-                                'var1_label': var1_label,
-                                'var1_code': var1_domain if var1_is_pv else var1_vars[0],
-                                'var2_label': var2_label,
-                                'var2_code': var2_domain if var2_is_pv else var2_vars[0],
-                                'corr': combined_corr,
-                                'p_value': combined_p_value
-                            }
-                            st.session_state.correlation_completed = True
-                            st.session_state.correlation_show_write_up = False
-                            st.session_state.correlation_write_up_content = None
-                            
-                            # Render the correlation table
-                            st.write("Rendering correlation table...")
-                            table_html = render_correlation_table(
-                                var1_label,
-                                var1_domain if var1_is_pv else var1_vars[0],
-                                var2_label,
-                                var2_domain if var2_is_pv else var2_vars[0],
-                                combined_corr,
-                                combined_p_value
-                            )
-                            components.html(table_html, height=200, scrolling=True)
-                            st.write("Correlation analysis completed.")
-                except Exception as e:
-                    st.error(f"Error computing correlation: {str(e)}")
-                    st.session_state.correlation_completed = False
-                    st.session_state.correlation_show_write_up = False
-                    st.session_state.correlation_write_up_content = None
-                    st.session_state.correlation_used_brr = False
-            elif st.session_state.correlation_results and st.session_state.correlation_completed:
-                if (st.session_state.correlation_var1 == var1_label and 
-                    st.session_state.correlation_var2 == var2_label):
-                    results = st.session_state.correlation_results
-                    if results is not None:
-                        table_html = render_correlation_table(
-                            results['var1_label'],
-                            results['var1_code'],
-                            results['var2_label'],
-                            results['var2_code'],
-                            results['corr'],
-                            results['p_value']
-                        )
-                        components.html(table_html, height=200, scrolling=True)
-                        st.write("Correlation analysis completed.")
-                    else:
-                        st.write("Correlation results are not available. Please run the analysis again.")
-                else:
-                    st.write("Variable selection has changed. Please click 'Run Analysis' to compute the correlation with the new variables.")
+                            # Store results
+                            results.append((selected_var_labels[i], selected_var_labels[j], combined_corr, combined_p_value, combined_se))
+                    
+                    # Store results and selected_codes in session state
+                    st.session_state.bivariate_results = results
+                    st.session_state.bivariate_selected_codes = selected_codes
+                    st.session_state.bivariate_completed = True
+                    
+                    # Render the correlation table
+                    st.write("Rendering correlation table...")
+                    table_html = render_correlation_table(selected_var_labels, selected_codes, results)
+                    components.html(table_html, height=400, scrolling=True)
+                    st.write("Bivariate correlation analysis completed.")
+                    
+                    # Provide download button for Word document
+                    doc_buffer = create_word_table(results)
+                    st.download_button(
+                        label="Download Table as Word Document",
+                        data=doc_buffer,
+                        file_name="Bivariate_Correlation_Table.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+            except Exception as e:
+                st.error(f"Error computing bivariate correlations: {str(e)}")
+                st.session_state.bivariate_completed = False
+                st.session_state.bivariate_results = None
+                st.session_state.bivariate_selected_codes = None
+        elif st.session_state.bivariate_results and st.session_state.bivariate_completed:
+            if selected_var_labels:
+                results = st.session_state.bivariate_results
+                selected_codes = st.session_state.bivariate_selected_codes
+                table_html = render_correlation_table(selected_var_labels, selected_codes, results)
+                components.html(table_html, height=400, scrolling=True)
+                st.write("Bivariate correlation analysis completed.")
+                
+                # Provide download button for Word document
+                doc_buffer = create_word_table(results)
+                st.download_button(
+                    label="Download Table as Word Document",
+                    data=doc_buffer,
+                    file_name="Bivariate_Correlation_Table.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
             else:
-                st.write("Please click 'Run Analysis' to compute the correlation.")
-            
-            if st.session_state.correlation_results and st.session_state.correlation_completed:
-                if (st.session_state.correlation_var1 == var1_label and 
-                    st.session_state.correlation_var2 == var2_label and
-                    st.session_state.correlation_results is not None):
-                    if st.button("Generate Write-Up", key="writeup_correlation"):
-                        results = st.session_state.correlation_results
-                        num_pvs = max(len(var1_vars) if var1_is_pv else 1, len(var2_vars) if var2_is_pv else 1)
-                        write_up = generate_correlation_write_up(
-                            results['var1_label'],
-                            results['var1_code'],
-                            results['var2_label'],
-                            results['var2_code'],
-                            results['corr'],
-                            results['p_value'],
-                            st.session_state.correlation_used_brr,
-                            num_pvs
-                        )
-                        st.session_state.correlation_show_write_up = True
-                        st.session_state.correlation_write_up_content = write_up
-                else:
-                    st.write("Correlation results are not available or variables have changed. Please run the analysis again to generate the write-up.")
-            
-            # Display the write-up if it exists
-            if st.session_state.correlation_show_write_up and st.session_state.correlation_write_up_content:
-                st.markdown("### Sample Write-Up", unsafe_allow_html=True)
-                st.markdown(st.session_state.correlation_write_up_content, unsafe_allow_html=True)
+                st.write("Please select at least two variables to compute bivariate correlations.")
+        else:
+            st.write("Please select at least two variables and click 'Run Analysis' to compute bivariate correlations.")
 
 # Instructions section
 st.header("Instructions")
 st.markdown("""
-- **Select Variables**: Choose two variables (domains or numeric variables) from the dropdown menus. Plausible value domains (e.g., Mathematics score, Reading score) will use all 10 plausible values for analysis.
-- **Run Analysis**: Click "Run Analysis" to perform the weighted correlation analysis. Analyses involving plausible values will be combined using Rubin's rules.
-- **Generate Write-Up**: After running the analysis, click "Generate Write-Up" to see a sample description of the results.
+- **Select Variables**: Choose two or more variables (domains or numeric variables) from the dropdown menus. Plausible value domains (e.g., Mathematics score, Reading score) will use all 10 plausible values for analysis.
+- **Run Analysis**: Click "Run Analysis" to perform the weighted bivariate correlation analysis. Analyses involving plausible values will be combined using Rubin's rules.
+- **View Results**: Results are displayed in an APA-style table. You can download the table as a Word document using the download button.
 - **Navigate**: Use the sidebar to switch between different analysis types or return to the main page to upload a new dataset.
 """)

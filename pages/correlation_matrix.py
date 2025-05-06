@@ -4,6 +4,14 @@ import numpy as np
 import re
 import streamlit.components.v1 as components
 from scipy.stats import t
+from io import BytesIO
+from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_ORIENT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 # Streamlit app configuration
 st.set_page_config(page_title="Correlation Matrix - PISA Data Exploration Tool", layout="wide")
@@ -137,45 +145,6 @@ def apply_rubins_rules_correlations(corrs_list, se_list, n):
         st.error(f"Error in apply_rubins_rules_correlations: {str(e)}")
         return np.nan, np.nan, np.nan
 
-# Function to generate sample write-up for correlation matrix
-def generate_correlation_matrix_write_up(selected_labels, selected_codes, corr_matrix, p_matrix, used_brr, max_pvs):
-    method_note = "using BRR standard errors" if used_brr else "using a simple method"
-    
-    # Conditionally include PV mention based on max_pvs
-    if max_pvs == 1:
-        write_up = (
-            f"A weighted correlation matrix analysis {method_note} "
-            f"was conducted on {len(selected_labels)} variables. "
-            f"The variables analyzed were: {', '.join([f'{label} ({code})' for label, code in zip(selected_labels, selected_codes)])}.\n\n"
-        )
-    else:
-        write_up = (
-            f"A weighted correlation matrix analysis {method_note} "
-            f"was conducted on {len(selected_labels)} variables, using {max_pvs} plausible values combined via Rubin's rules "
-            f"where applicable. The variables analyzed were: {', '.join([f'{label} ({code})' for label, code in zip(selected_labels, selected_codes)])}.\n\n"
-        )
-    
-    significant_pairs = []
-    for i in range(len(selected_labels)):
-        for j in range(i + 1, len(selected_labels)):
-            corr = corr_matrix[i, j]
-            p_value = p_matrix[i, j]
-            if np.isnan(p_value) or p_value >= 0.05:
-                continue
-            corr_display = f"{corr:.3f}" if not np.isnan(corr) else "N/A"
-            p_display = "< .001" if p_value < 0.001 else f"= {p_value:.3f}" if not np.isnan(p_value) else "N/A"
-            significant_pairs.append(
-                f"{selected_labels[i]} ({selected_codes[i]}) and {selected_labels[j]} ({selected_codes[j]}) "
-                f"showed a significant correlation of {corr_display} (p {p_display})"
-            )
-    
-    if significant_pairs:
-        write_up += "Significant correlations (p < 0.05) were found for the following pairs:\n- " + "\n- ".join(significant_pairs) + "."
-    else:
-        write_up += "No significant correlations (p < 0.05) were found among the selected variables."
-    
-    return write_up
-
 # Function to render correlation matrix as HTML table
 def render_correlation_matrix(selected_labels, corr_matrix, p_matrix):
     html_content = """
@@ -266,7 +235,7 @@ def render_correlation_matrix(selected_labels, corr_matrix, p_matrix):
             else:
                 corr = corr_matrix[i, j]
                 p_value = p_matrix[i, j]
-                corr_display = f"{corr:.3f}" if not np.isnan(corr) else "-"
+                corr_display = f"{corr:.2f}" if not np.isnan(corr) else "-"
                 sig_display = "**" if p_value < 0.01 else "*" if p_value < 0.05 else "" if not np.isnan(p_value) else ""
                 cell_content = f"{corr_display}{sig_display}"
             row += f"<td>{cell_content}</td>"
@@ -275,6 +244,120 @@ def render_correlation_matrix(selected_labels, corr_matrix, p_matrix):
     
     full_html = html_content.replace("{{header_row}}", header_row).replace("{{data_rows}}", data_rows)
     return full_html
+
+# Function to set cell borders in Word document
+def set_cell_border(cell, top=False, bottom=False, left=False, right=False):
+    tc = cell._element
+    tcPr = tc.get_or_add_tcPr()
+    
+    # Remove existing borders
+    for border in ['top', 'bottom', 'left', 'right']:
+        existing_border = tcPr.find(qn(f'w:{border}'))
+        if existing_border is not None:
+            tcPr.remove(existing_border)
+    
+    # Set new borders where specified
+    if top:
+        border = OxmlElement('w:top')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')  # Border width in eighths of a point
+        tcPr.append(border)
+    if bottom:
+        border = OxmlElement('w:bottom')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')
+        tcPr.append(border)
+    if left:
+        border = OxmlElement('w:left')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')
+        tcPr.append(border)
+    if right:
+        border = OxmlElement('w:right')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')
+        tcPr.append(border)
+
+# Function to create a Word document with the APA-style table
+def create_word_table(selected_labels, corr_matrix, p_matrix):
+    doc = Document()
+    
+    # Set document to landscape orientation
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width = Inches(11)
+    section.page_height = Inches(8.5)
+    
+    # Add title
+    title = doc.add_paragraph("Correlation Matrix")
+    title.runs[0].bold = True
+    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    title.runs[0].font.name = 'Times New Roman'
+    title.runs[0].font.size = Pt(10)
+    
+    # Add subtitle
+    subtitle = doc.add_paragraph("Weighted Correlations Between Selected Variables")
+    subtitle.runs[0].italic = True
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    subtitle.runs[0].font.name = 'Times New Roman'
+    subtitle.runs[0].font.size = Pt(10)
+    
+    # Create table
+    table = doc.add_table(rows=1 + len(selected_labels), cols=1 + len(selected_labels))
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.style = 'Normal Table'  # Use a style with no borders
+    
+    # Set column widths
+    for column in table.columns:
+        for cell in column.cells:
+            cell.width = Inches(0.7)  # Adjusted for landscape orientation
+    
+    # Add header row
+    table.rows[0].cells[0].text = ""
+    for idx, label in enumerate(selected_labels):
+        cell = table.rows[0].cells[idx + 1]
+        cell.text = label
+        cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
+        cell.paragraphs[0].runs[0].font.size = Pt(10)
+        cell.paragraphs[0].runs[0].bold = True
+        set_cell_border(cell, top=True, bottom=True)
+    # Set border for the empty cell in header row
+    set_cell_border(table.rows[0].cells[0], top=True, bottom=True)
+    
+    # Add data rows
+    for i in range(len(selected_labels)):
+        row = table.rows[i + 1]
+        row.cells[0].text = selected_labels[i]
+        row.cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
+        row.cells[0].paragraphs[0].runs[0].font.name = 'Times New Roman'
+        row.cells[0].paragraphs[0].runs[0].font.size = Pt(10)
+        row.cells[0].paragraphs[0].runs[0].bold = True
+        for j in range(len(selected_labels)):
+            cell = row.cells[j + 1]
+            if i == j:
+                cell_content = "1.00"
+            else:
+                corr = corr_matrix[i, j]
+                p_value = p_matrix[i, j]
+                corr_display = f"{corr:.2f}" if not np.isnan(corr) else "-"
+                sig_display = "**" if p_value < 0.01 else "*" if p_value < 0.05 else "" if not np.isnan(p_value) else ""
+                cell_content = f"{corr_display}{sig_display}"
+            cell.text = cell_content
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
+            cell.paragraphs[0].runs[0].font.size = Pt(10)
+            if i == len(selected_labels) - 1:
+                set_cell_border(cell, bottom=True)
+        # Set border for the first cell in each row
+        if i == len(selected_labels) - 1:
+            set_cell_border(row.cells[0], bottom=True)
+    
+    # Save document to a BytesIO buffer
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 # Access data from session state
 df = st.session_state.get('df', None)
@@ -287,12 +370,6 @@ if 'correlation_matrix_results' not in st.session_state:
     st.session_state.correlation_matrix_results = None
 if 'correlation_matrix_completed' not in st.session_state:
     st.session_state.correlation_matrix_completed = False
-if 'correlation_matrix_show_write_up' not in st.session_state:
-    st.session_state.correlation_matrix_show_write_up = False
-if 'correlation_matrix_write_up_content' not in st.session_state:
-    st.session_state.correlation_matrix_write_up_content = None
-if 'correlation_matrix_selected_vars' not in st.session_state:
-    st.session_state.correlation_matrix_selected_vars = None
 if 'correlation_matrix_used_brr' not in st.session_state:
     st.session_state.correlation_matrix_used_brr = False
 
@@ -420,16 +497,6 @@ else:
         
         run_analysis = st.button("Run Analysis", key="run_correlation_matrix")
         
-        # Update session state with selections
-        if selected_var_labels != st.session_state.correlation_matrix_selected_vars:
-            st.session_state.correlation_matrix_selected_vars = selected_var_labels
-            if not run_analysis:  # Only reset if not running analysis
-                st.session_state.correlation_matrix_results = None
-                st.session_state.correlation_matrix_completed = False
-                st.session_state.correlation_matrix_show_write_up = False
-                st.session_state.correlation_matrix_write_up_content = None
-                st.session_state.correlation_matrix_used_brr = False
-        
         if run_analysis and (selected_vars or selected_domains) and len(selected_var_labels) >= 2:
             try:
                 if 'W_FSTUWT' not in df.columns:
@@ -533,67 +600,58 @@ else:
                         'p_matrix': p_matrix
                     }
                     st.session_state.correlation_matrix_completed = True
-                    st.session_state.correlation_matrix_show_write_up = False
-                    st.session_state.correlation_matrix_write_up_content = None
                     
                     # Render the correlation matrix
                     st.write("Rendering correlation matrix...")
                     table_html = render_correlation_matrix(selected_labels, corr_matrix, p_matrix)
                     components.html(table_html, height=400, scrolling=True)
                     st.write("Correlation matrix analysis completed.")
+                    
+                    # Provide download button for Word document
+                    doc_buffer = create_word_table(selected_labels, corr_matrix, p_matrix)
+                    st.download_button(
+                        label="Download Table as Word Document",
+                        data=doc_buffer,
+                        file_name="Correlation_Matrix_Table.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
             except Exception as e:
                 st.error(f"Error computing correlation matrix: {str(e)}")
                 st.session_state.correlation_matrix_completed = False
-                st.session_state.correlation_matrix_show_write_up = False
-                st.session_state.correlation_matrix_write_up_content = None
-                st.session_state.correlation_matrix_used_brr = False
+                st.session_state.correlation_matrix_results = None
         elif st.session_state.correlation_matrix_results and st.session_state.correlation_matrix_completed:
-            if st.session_state.correlation_matrix_selected_vars == selected_var_labels:
+            if selected_var_labels:
                 results = st.session_state.correlation_matrix_results
-                if results is not None:
-                    table_html = render_correlation_matrix(
-                        results['labels'],
-                        results['corr_matrix'],
-                        results['p_matrix']
-                    )
-                    components.html(table_html, height=400, scrolling=True)
-                    st.write("Correlation matrix analysis completed.")
-                else:
-                    st.write("Correlation matrix results are not available. Please run the analysis again.")
+                table_html = render_correlation_matrix(
+                    results['labels'],
+                    results['corr_matrix'],
+                    results['p_matrix']
+                )
+                components.html(table_html, height=400, scrolling=True)
+                st.write("Correlation matrix analysis completed.")
+                
+                # Provide download button for Word document
+                doc_buffer = create_word_table(
+                    results['labels'],
+                    results['corr_matrix'],
+                    results['p_matrix']
+                )
+                st.download_button(
+                    label="Download Table as Word Document",
+                    data=doc_buffer,
+                    file_name="Correlation_Matrix_Table.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
             else:
-                st.write("Variable selection has changed. Please click 'Run Analysis' to compute the correlation matrix with the new variables.")
+                st.write("Please select at least two variables to compute the correlation matrix.")
         else:
-            st.write("Please click 'Run Analysis' to compute the correlation matrix.")
-        
-        if st.session_state.correlation_matrix_results and st.session_state.correlation_matrix_completed:
-            if (st.session_state.correlation_matrix_selected_vars == selected_var_labels and
-                st.session_state.correlation_matrix_results is not None):
-                if st.button("Generate Write-Up", key="writeup_correlation_matrix"):
-                    results = st.session_state.correlation_matrix_results
-                    max_pvs = max([len(pv_domains[label_to_domain[label]]) if label in label_to_domain else 1 for label in selected_var_labels])
-                    write_up = generate_correlation_matrix_write_up(
-                        results['labels'],
-                        results['codes'],
-                        results['corr_matrix'],
-                        results['p_matrix'],
-                        st.session_state.correlation_matrix_used_brr,
-                        max_pvs
-                    )
-                    st.session_state.correlation_matrix_show_write_up = True
-                    st.session_state.correlation_matrix_write_up_content = write_up
-            else:
-                st.write("Correlation matrix results are not available or variables have changed. Please run the analysis again to generate the write-up.")
-        
-        # Display the write-up if it exists
-        if st.session_state.correlation_matrix_show_write_up and st.session_state.correlation_matrix_write_up_content:
-            st.markdown("### Sample Write-Up", unsafe_allow_html=True)
-            st.markdown(st.session_state.correlation_matrix_write_up_content, unsafe_allow_html=True)
+            st.write("Please select at least two variables and click 'Run Analysis' to compute the correlation matrix.")
 
 # Instructions section
 st.header("Instructions")
 st.markdown("""
 - **Select Variables**: Choose two or more variables (domains or numeric variables) from the dropdown menus. Plausible value domains (e.g., Mathematics score, Reading score) will use all 10 plausible values for analysis.
 - **Run Analysis**: Click "Run Analysis" to perform the weighted correlation matrix analysis. Analyses involving plausible values will be combined using Rubin's rules.
-- **Generate Write-Up**: After running the analysis, click "Generate Write-Up" to see a sample description of the results.
+- **View Results**: Results are displayed in an APA-style table with correlations rounded to 2 decimal places. You can download the table as a Word document using the download button.
 - **Navigate**: Use the sidebar to switch between different analysis types or return to the main page to upload a new dataset.
 """)
