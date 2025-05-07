@@ -4,7 +4,7 @@ from email.mime.text import MIMEText
 from datetime import datetime
 
 # Streamlit app configuration
-st.set_page_config(page_title="Feedback and Recommendations - PISA Data Exploration Tool", layout="wide")
+st.set_page_config(page_title="Feedback - PISA Data Exploration Tool", layout="wide")
 
 # Title
 st.title("Feedback and Recommendations")
@@ -58,20 +58,3 @@ if st.session_state.feedback_list:
     st.subheader("Submitted Feedback")
     for idx, fb in enumerate(st.session_state.feedback_list, 1):
         st.write(f"Feedback {idx}: {fb}")
-
-# Recommendations Section
-st.header("Recommendations")
-st.markdown("""
-Here are some recommendations for using the PISA Data Exploration Tool effectively:
-
-- **Data Upload**: Ensure your PISA dataset is in .sav format and contains the necessary variables (e.g., CNTRYID, W_FSTUWT) for analysis.
-- **Country Filtering**: Use the country filter in the sidebar to focus on specific countries, which can help reduce dataset size and improve performance.
-- **Analysis Selection**: Choose the appropriate analysis type based on your research question:
-  - Use **Bivariate Correlation** to explore relationships between two variables.
-  - Use **Correlation Matrix** to examine correlations across multiple variables.
-  - Use **Linear Regression** for predictive modeling and understanding variable impacts.
-- **Handling Missing Data**: Be aware of missing values in your dataset, as they may affect analysis results. Consider imputation or exclusion strategies as needed.
-- **Performance Tips**: For large datasets, filtering by country or selecting a subset of variables can improve app responsiveness.
-
-Feel free to share additional feedback or suggestions above to help us improve the tool!
-""")
