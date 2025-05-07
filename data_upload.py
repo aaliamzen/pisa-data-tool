@@ -23,111 +23,6 @@ if 'data_loaded' not in st.session_state:
 if 'visible_columns' not in st.session_state:
     st.session_state.visible_columns = []
 
-# Function to generate synthetic PISA-like data for testing
-def generate_synthetic_data(n_students=1000, n_countries=5):
-    np.random.seed(42)
-    countries = [f"Country_{i}" for i in range(n_countries)]
-    country_codes = list(range(1, n_countries + 1))
-    country_names = [f"Country_{i}" for i in range(1, n_countries + 1)]
-    data = {
-        "CNTRYID": np.random.choice(country_codes, n_students),
-        "CNTSCHID": np.random.randint(100, 999, n_students),
-        "CNTSTUID": np.random.randint(1000, 9999, n_students),
-        "W_FSTUWT": np.random.uniform(0.5, 2.0, n_students),
-        "PV1MATH": norm.rvs(500, 100, n_students),
-        "PV1READ": norm.rvs(500, 100, n_students),
-        "PV1SCIE": norm.rvs(500, 100, n_students),
-        "JOYSCI": norm.rvs(0, 1, n_students),
-        "BELONG": norm.rvs(0, 1, n_students),
-        "ICTSCH": norm.rvs(0, 1, n_students),
-        "ESCS": np.random.uniform(-3, 3, n_students),
-        "ST004D01T": np.random.choice([1, 2], n_students),
-        "ST12345678": np.random.randint(1, 5, n_students),
-        "FL90123456": np.random.randint(1, 5, n_students),
-        "CYC": np.random.choice(["2015", "2018", "2022"], n_students),
-        "STRATUM": [f"Stratum_{i}" for i in np.random.randint(1, 10, n_students)],
-        "COBN_S": np.random.choice(countries, n_students),
-        "COBN_M": np.random.choice(countries, n_students),
-        "OCOD1": [f"Occup_{i}" for i in np.random.randint(1000, 9999, n_students)],
-        "ST001D01T": np.random.randint(7, 12, n_students),
-        "ST003D02T": np.random.randint(1, 12, n_students),
-        "ST003D03T": np.random.randint(2000, 2007, n_students),
-        "EFFORT1": np.random.uniform(0, 10, n_students),
-        "EFFORT2": np.random.uniform(0, 10, n_students),
-        "PROGN": np.random.choice(["Academic", "Vocational", "Other"], n_students),
-        "ISCEDP": np.random.randint(1, 6, n_students),
-        "SENWT": np.random.uniform(0, 1, n_students),
-        "VER_DAT": ["2023-01-01"] * n_students,
-        "test": np.random.randint(0, 2, n_students),
-        "MISSING_TEST": [np.nan] * n_students,
-        "GRADE": np.random.randint(7, 12, n_students),
-        "UNIT": [f"Unit_{i}" for i in np.random.randint(1, 100, n_students)],
-        "WVARSTRR": np.random.randint(1, 50, n_students),
-        "PAREDINT": np.random.randint(0, 7, n_students),
-        "HISEI": np.random.uniform(10, 90, n_students),
-        "HOMEPOS": np.random.uniform(-3, 3, n_students),
-        "BMMJ1": [f"Occ_{i}" for i in np.random.randint(1000, 9999, n_students)],
-        "BFMJ2": [f"Occ_{i}" for i in np.random.randint(1000, 9999, n_students)],
-    }
-    # Add replicate weights for BRR calculation
-    for i in range(1, 81):
-        data[f"W_FSTURWT{i}"] = np.random.uniform(0.5, 2.0, n_students)
-    df = pd.DataFrame(data)
-    df.loc[np.random.choice(df.index, 100), ["PV1MATH", "PV1READ", "PV1SCIE"]] = np.nan
-    variable_labels = {
-        "CNTRYID": "Country identifier",
-        "CNTSCHID": "School identifier",
-        "CNTSTUID": "Student identifier",
-        "W_FSTUWT": "Final student weight",
-        "PV1MATH": "Plausible value 1 for mathematics",
-        "PV1READ": "Plausible value 1 for reading",
-        "PV1SCIE": "Plausible value 1 for science",
-        "JOYSCI": "Joy of science scale score",
-        "BELONG": "Sense of belonging scale score",
-        "ICTSCH": "ICT availability at school (WLE)",
-        "ESCS": "Economic, social, and cultural status index",
-        "ST004D01T": "Student gender",
-        "ST12345678": "Student questionnaire item",
-        "FL90123456": "Family questionnaire item",
-        "CYC": "PISA cycle",
-        "STRATUM": "Sampling stratum",
-        "COBN_S": "Student country of birth",
-        "COBN_M": "Mother country of birth",
-        "OCOD1": "Occupation code 1",
-        "ST001D01T": "Student grade level",
-        "ST003D02T": "Student birth month",
-        "ST003D03T": "Student birth year",
-        "EFFORT1": "Effort level 1",
-        "EFFORT2": "Effort level 2",
-        "PROGN": "Program type",
-        "ISCEDP": "ISCED program",
-        "SENWT": "Senate weight",
-        "VER_DAT": "Dataset version",
-        "test": "Test variable",
-        "MISSING_TEST": "Test column with all missing values",
-        "GRADE": "Student grade",
-        "UNIT": "Sampling unit identifier",
-        "WVARSTRR": "Weight variance stratum",
-        "PAREDINT": "Parental education (international scale)",
-        "HISEI": "Highest parental occupational status (ISEI)",
-        "HOMEPOS": "Home possessions index",
-        "BMMJ1": "Mother's occupation (main job)",
-        "BFMJ2": "Father's occupation (main job)",
-    }
-    for i in range(1, 81):
-        variable_labels[f"W_FSTURWT{i}"] = f"Replicate weight {i}"
-    value_labels = {
-        "ST004D01T": {1: "Female", 2: "Male"},
-        "PROGN": {"Academic": "Academic", "Vocational": "Vocational", "Other": "Other"},
-        "ISCEDP": {1: "Level 1", 2: "Level 2", 3: "Level 3", 4: "Level 4", 5: "Level 5"},
-        "ST001D01T": {7: "Grade 7", 8: "Grade 8", 9: "Grade 9", 10: "Grade 10", 11: "Grade 11"},
-        "ST003D02T": {1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June",
-                      7: "July", 8: "August", 9: "September", 10: "October", 11: "November", 12: "December"},
-        "GRADE": {7: "Grade 7", 8: "Grade 8", 9: "Grade 9", 10: "Grade 10", 11: "Grade 11"},
-        "PAREDINT": {0: "None", 1: "ISCED 1", 2: "ISCED 2", 3: "ISCED 3B, C", 4: "ISCED 3A", 5: "ISCED 4", 6: "ISCED 5B", 7: "ISCED 5A, 6"},
-        "CNTRYID": {i: name for i, name in zip(country_codes, country_names)},
-    }
-    return df, variable_labels, value_labels
 
 # Function to safely convert label to string
 def safe_label_to_string(label):
@@ -207,12 +102,6 @@ def load_pisa_data(uploaded_file, cycle=None):
             df = None
             variable_labels = {}
             value_labels = {}
-    else:
-        st.info("Please upload a PISA .sav file to view the data preview.")
-        df = None
-        variable_labels = {}
-        value_labels = {}
-    
     return df, variable_labels, value_labels
 
 # Function to render DataFrame as HTML table with tooltips
