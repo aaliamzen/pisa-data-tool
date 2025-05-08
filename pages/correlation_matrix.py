@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import re
 import streamlit.components.v1 as components
+import matplotlib.pyplot as plt  
 from scipy.stats import t
 from io import BytesIO
 from docx import Document
@@ -56,6 +57,35 @@ def weighted_correlation(x, y, w):
     except Exception as e:
         st.error(f"Error in weighted_correlation: {str(e)}")
         return np.nan, np.nan
+
+def create_weighted_scatter(df, var1, var2, weights, var1_label, var2_label):  
+    # Create figure and axis objects  
+    fig, ax = plt.subplots(figsize=(6, 4))  
+      
+    # Normalize weights for visualization (between 20 and 200 for point sizes)  
+    w_norm = 20 + (180 * (weights - weights.min()) / (weights.max() - weights.min()))  
+      
+    # Create scatter plot  
+    scatter = ax.scatter(df[var1], df[var2], s=w_norm, alpha=0.5, c=weights,   
+                        cmap='viridis', edgecolor='none')  
+      
+    # Add regression line  
+    z = np.polyfit(df[var1], df[var2], 1)  
+    p = np.poly1d(z)  
+    ax.plot(df[var1], p(df[var1]), "r--", alpha=0.8)  
+      
+    # Set labels and title  
+    ax.set_xlabel(var1_label)  
+    ax.set_ylabel(var2_label)  
+    ax.set_title(f'Weighted Scatter Plot: {var1_label} vs {var2_label}')  
+      
+    # Add colorbar  
+    plt.colorbar(scatter, ax=ax, label='Weight')  
+      
+    # Adjust layout to prevent label cutoff  
+    plt.tight_layout()  
+      
+    return fig  
 
 # Function to compute BRR standard errors for correlation
 def compute_brr_se_correlation(x, y, replicate_weights, corr_data, progress_bar):
@@ -149,6 +179,10 @@ def apply_rubins_rules_correlations(corrs_list, se_list, n):
 def render_correlation_matrix(selected_labels, corr_matrix, p_matrix):
     html_content = """
     <style>
+    table, th, td {  
+            font-weight: normal !important;  
+    }
+    
     .corr-matrix-container {
         display: inline-block;
         overflow-x: auto;
@@ -320,7 +354,7 @@ def create_word_table(selected_labels, corr_matrix, p_matrix):
         cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
         cell.paragraphs[0].runs[0].font.size = Pt(10)
-        cell.paragraphs[0].runs[0].bold = True
+        cell.paragraphs[0].runs[0].bold = False
         set_cell_border(cell, top=True, bottom=True)
     # Set border for the empty cell in header row
     set_cell_border(table.rows[0].cells[0], top=True, bottom=True)
@@ -332,7 +366,7 @@ def create_word_table(selected_labels, corr_matrix, p_matrix):
         row.cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
         row.cells[0].paragraphs[0].runs[0].font.name = 'Times New Roman'
         row.cells[0].paragraphs[0].runs[0].font.size = Pt(10)
-        row.cells[0].paragraphs[0].runs[0].bold = True
+        row.cells[0].paragraphs[0].runs[0].bold = False
         for j in range(len(selected_labels)):
             cell = row.cells[j + 1]
             if i == j:
@@ -601,11 +635,49 @@ else:
                     }
                     st.session_state.correlation_matrix_completed = True
                     
-                    # Render the correlation matrix
-                    st.write("Rendering correlation matrix...")
-                    table_html = render_correlation_matrix(selected_labels, corr_matrix, p_matrix)
-                    components.html(table_html, height=400, scrolling=True)
-                    st.write("Correlation matrix analysis completed.")
+                    # Render the correlation matrix  
+                                        # Render the correlation matrix  
+                    st.write("Rendering correlation matrix...")  
+                    table_html = render_correlation_matrix(selected_labels, corr_matrix, p_matrix)  
+                    # Calculate height based on number of variables (approximately 30px per row plus some padding)  
+                    matrix_height = len(selected_labels) * 90 + 30 
+                    components.html(table_html, height=matrix_height, scrolling=True)  
+                    st.write("Correlation matrix analysis completed.")  
+                      
+                    # Generate scatter plots for all pairs  
+                    st.header("Scatter plots for all variable pairs:")  
+                      
+                    # Create pairs of variables  
+                    n_vars = len(selected_labels)  
+                    for i in range(n_vars):  
+                        for j in range(i+1, n_vars):  # Only do upper triangle to avoid duplicates  
+                            var1_label = selected_labels[i]  
+                            var2_label = selected_labels[j]  
+                            var1_code = selected_codes[i]  
+                            var2_code = selected_codes[j]  
+                              
+                            # Handle plausible value domains  
+                            if var1_code in pv_domains:  
+                                var1_data = df[pv_domains[var1_code][0]]  
+                            else:  
+                                var1_data = df[var1_code]  
+                                  
+                            if var2_code in pv_domains:  
+                                var2_data = df[pv_domains[var2_code][0]]  
+                            else:  
+                                var2_data = df[var2_code]  
+                              
+                            # Create plot dataframe  
+                            plot_df = pd.DataFrame({  
+                                var1_code: var1_data,  
+                                var2_code: var2_data,  
+                                'weights': df['W_FSTUWT']  
+                            }).dropna()  
+                              
+                            # Create scatter plot  
+                            fig = create_weighted_scatter(plot_df, var1_code, var2_code,   
+                                                        plot_df['weights'], var1_label, var2_label)  
+                            st.pyplot(fig)  
                     
                     # Provide download button for Word document
                     doc_buffer = create_word_table(selected_labels, corr_matrix, p_matrix)
