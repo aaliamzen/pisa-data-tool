@@ -17,7 +17,13 @@ try:
 except Exception as e:
     st.error(f"Failed to load logo: {e}")
   
-st.set_page_config(page_title="PISA Data Exploration Tool - Descriptive Statistics", layout="wide")  
+st.set_page_config(page_title="PISA Data Exploration Tool - Descriptive Statistics", layout="wide")
+
+# page reorder.py
+def page3():
+    st.title("Descriptive Statistics")
+    st.write("Descriptive Statistics, now appearing first in the sidebar!")
+
   
 if 'df' not in st.session_state or st.session_state.df is None:  
     st.error("Please upload your data first in the Data Upload page!")  
