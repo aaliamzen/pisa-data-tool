@@ -1240,6 +1240,7 @@ else:
         else:
             st.write("Please select a dependent variable and at least one covariate, then click 'Run Analysis' to compute linear regression.")
 
+
 # Instructions section
 st.header("Instructions")
 st.markdown("""
