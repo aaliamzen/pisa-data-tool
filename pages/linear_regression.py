@@ -989,7 +989,7 @@ if 'regression_completed' in st.session_state:
     st.session_state.regression_completed = False
 
 # Streamlit UI
-st.title("Linear Regression Analysis")
+st.title("Linear Regression Analysis (OLS)")
 
 if df is None or df.empty:
     st.warning("No data available. Please upload a dataset on the main page.")
