@@ -244,24 +244,6 @@ st.header("Data Summary")
 if df is None:
     st.info("Please upload a PISA .sav file to view the data preview.")
 else:
-    # Country selection
-    st.sidebar.header("Data Filtering")
-    country_col = "CNTRYID" if "CNTRYID" in df.columns else "CNT"
-    if country_col in df.columns:
-        country_values = sorted(df[country_col].unique())
-        if country_col in value_labels:
-            country_labels = [value_labels[country_col].get(val, str(val)) for val in country_values]
-            label_to_value = {value_labels[country_col].get(val, str(val)): val for val in country_values}
-        else:
-            country_labels = [str(val) for val in country_values]
-            label_to_value = {str(val): val for val in country_values}
-        selected_labels = st.sidebar.multiselect("Select Countries", country_labels, default=country_labels[:2] if country_labels else [])
-        selected_countries = [label_to_value[label] for label in selected_labels if label in label_to_value]
-        if selected_countries:
-            df = df[df[country_col].isin(selected_countries)]
-            st.session_state.df = df  # Update session state with filtered data
-    else:
-        st.sidebar.warning("No country column (CNTRYID or CNT) found in the dataset.")
 
     if df.empty:
         st.warning("No data available after filtering by selected countries.")
