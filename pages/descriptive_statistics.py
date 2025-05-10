@@ -7,7 +7,13 @@ import seaborn as sns
 from docx import Document  
 from docx.shared import Pt, Inches  
 from docx.enum.section import WD_ORIENT  
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT  
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+
+# Add logo that persists across all pages
+try:
+    st.logo("assets/logo.png")  # Replace with the path to your logo file, e.g., "assets/logo.png"
+except Exception as e:
+    st.error(f"Failed to load logo: {e}")
   
 st.set_page_config(page_title="PISA Data Exploration Tool - Descriptive Statistics", layout="wide")  
   

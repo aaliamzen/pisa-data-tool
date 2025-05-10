@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import re
 import streamlit.components.v1 as components
-import matplotlib.pyplot as plt  
+import matplotlib.pyplot as plt
 from scipy.stats import t
 from io import BytesIO
 from docx import Document
@@ -13,6 +13,14 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.section import WD_ORIENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+import textwrap
+import itertools
+
+# Add logo that persists across all pages
+try:
+    st.logo("assets/logo.png")  # Replace with the path to your logo file, e.g., "assets/logo.png"
+except Exception as e:
+    st.error(f"Failed to load logo: {e}")
 
 # Streamlit app configuration
 st.set_page_config(page_title="Correlation Matrix - PISA Data Exploration Tool", layout="wide")
@@ -58,37 +66,95 @@ def weighted_correlation(x, y, w):
         st.error(f"Error in weighted_correlation: {str(e)}")
         return np.nan, np.nan
 
-def create_weighted_scatter(df, var1, var2, weights, var1_label, var2_label):  
-    # Create figure and axis objects  
-    fig, ax = plt.subplots(figsize=(6, 4))  
-      
-    # Normalize weights for visualization (between 20 and 200 for point sizes)  
-    w_norm = 20 + (180 * (weights - weights.min()) / (weights.max() - weights.min()))  
-      
-    # Create scatter plot  
-    scatter = ax.scatter(df[var1], df[var2], s=w_norm, alpha=0.5, c=weights,   
-                        cmap='viridis', edgecolor='none')  
-      
-    # Add regression line  
-    z = np.polyfit(df[var1], df[var2], 1)  
-    p = np.poly1d(z)  
-    ax.plot(df[var1], p(df[var1]), "r--", alpha=0.8)  
-      
-    # Set labels and title  
-    ax.set_xlabel(var1_label)  
-    ax.set_ylabel(var2_label)  
-    ax.set_title(f'Weighted Scatter Plot: {var1_label} vs {var2_label}')  
-      
-    # Add colorbar  
-    plt.colorbar(scatter, ax=ax, label='Weight')  
-      
-    # Adjust layout to prevent label cutoff  
-    plt.tight_layout()  
-      
-    return fig  
+def create_weighted_scatter(df, var1, var2, weights, var1_label, var2_label):
+    """
+    Create a weighted scatter plot with a regression line.
+    
+    Parameters:
+    - df: pandas DataFrame containing the data.
+    - var1, var2: Column names for x and y variables.
+    - weights: pandas Series or array of weights for each data point.
+    - var1_label, var2_label: Labels for x and y axes.
+    
+    Returns:
+    - fig: matplotlib Figure object.
+    """
+    # Remove rows with NaN in var1, var2, or weights
+    valid_mask = (~df[var1].isna()) & (~df[var2].isna()) & (~weights.isna())
+    x = df[var1][valid_mask].values
+    y = df[var2][valid_mask].values
+    w = weights[valid_mask].values
+
+    # Check if there’s enough data to plot
+    if len(x) < 2 or len(y) < 2 or len(w) < 2:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(0.5, 0.5, "Insufficient data to plot (too many NaN values)", 
+                ha='center', va='center', fontsize=10, color='red')
+        ax.set_xlabel(var1_label, fontsize=8)
+        ax.set_ylabel(var2_label, fontsize=8)
+        plt.tight_layout()
+        return fig
+
+    # Create figure and axis objects with slightly larger size
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    # Normalize weights for visualization (between 10 and 100 for point sizes)
+    w_min, w_max = w.min(), w.max()
+    if w_max == w_min:  # Avoid division by zero
+        w_norm = np.full_like(w, 50)  # Default size if all weights are the same
+    else:
+        w_norm = 10 + (90 * (w - w_min) / (w_max - w_min))
+
+    # Compute weighted Pearson correlation coefficient
+    # Center the data
+    x_mean = np.average(x, weights=w)
+    y_mean = np.average(y, weights=w)
+    # Weighted covariance
+    cov_xy = np.sum(w * (x - x_mean) * (y - y_mean)) / np.sum(w)
+    # Weighted standard deviations
+    var_x = np.sum(w * (x - x_mean)**2) / np.sum(w)
+    var_y = np.sum(w * (y - y_mean)**2) / np.sum(w)
+    if var_x == 0 or var_y == 0:
+        corr = 0.0
+    else:
+        corr = cov_xy / np.sqrt(var_x * var_y)
+
+    # Create scatter plot with smaller points
+    scatter = ax.scatter(x, y, s=w_norm, alpha=0.5, c=w, cmap='viridis', edgecolor='none')
+
+    # Add weighted regression line
+    slope = cov_xy / var_x if var_x != 0 else 0
+    intercept = y_mean - slope * x_mean
+    x_range = np.array([x.min(), x.max()])
+    y_range = slope * x_range + intercept
+    ax.plot(x_range, y_range, "r--", alpha=0.8, label=f'Regression (r={corr:.2f})')
+
+    # Add gridlines for better readability
+    ax.grid(True, linestyle='--', alpha=0.7)
+
+    # Wrap the axis labels to a maximum width of 50 characters
+    wrapped_xlabel = textwrap.fill(var1_label, width=50)
+    wrapped_ylabel = textwrap.fill(var2_label, width=50)
+
+    # Set labels with smaller fonts
+    ax.set_xlabel(wrapped_xlabel, fontsize=8)
+    ax.set_ylabel(wrapped_ylabel, fontsize=8)
+    
+    # Add legend with smaller font
+    ax.legend(fontsize=7)
+
+    # Add colorbar with smaller label
+    cbar = plt.colorbar(scatter, ax=ax)
+    cbar.set_label('Weight', fontsize=7)
+    cbar.ax.tick_params(labelsize=6)
+
+    # Adjust layout to prevent label cutoff
+    plt.tight_layout()
+
+    return fig
 
 # Function to compute BRR standard errors for correlation
-def compute_brr_se_correlation(x, y, replicate_weights, corr_data, progress_bar):
+def compute_brr_se_correlation(x, y, replicate_weights, corr_data, progress_bar=None):
     try:
         # Initial correlation with final student weights for reference
         main_corr, _ = weighted_correlation(x, y, corr_data['W_FSTUWT'].values)
@@ -119,8 +185,6 @@ def compute_brr_se_correlation(x, y, replicate_weights, corr_data, progress_bar)
             rep_corr, _ = weighted_correlation(x_rep, y_rep, w_rep)
             if not np.isnan(rep_corr):
                 replicate_corrs.append(rep_corr)
-            # Update progress bar
-            progress_bar.progress((idx + 1) / total_weights)
         
         if not replicate_corrs:
             return np.nan
@@ -487,20 +551,12 @@ else:
     if len(unique_var_labels) + len(domain_options) < 2:
         st.warning("At least two numeric variables or domains are required for correlation matrix analysis.")
     else:
-        # Select Variables (default to MATH domain and ESCS)
-        st.write("Select variables for correlation matrix (default: Mathematics score, ESCS):")
+        # Select Variables (default to MATH domain only)
+        st.write("Select variables for correlation matrix (default: Mathematics score):")
         all_var_options = domain_options + unique_var_labels
         default_vars = []
         if "Mathematics score" in all_var_options:
             default_vars.append("Mathematics score")
-        escs_label = variable_labels.get("ESCS", "ESCS")
-        if escs_label in seen_labels and escs_label in all_var_options:
-            default_vars.append(escs_label)
-        elif all_var_options and len(all_var_options) > 1:
-            default_vars.append(all_var_options[1 if "Mathematics score" in all_var_options else 0])
-        
-        if len(default_vars) < 2 and len(all_var_options) >= 2:
-            default_vars = all_var_options[:2]  # Ensure at least two variables are selected by default
         
         selected_var_labels = st.multiselect(
             "Variables",
@@ -549,10 +605,13 @@ else:
                     # Compute the maximum number of plausible values
                     max_pvs = max([len(vars) for vars in all_vars])
                     
-                    # Progress bar for PV iterations
+                    # Progress bar for the entire process
                     pv_progress = st.progress(0)
                     total_iterations = (n_vars * (n_vars - 1)) // 2 * max_pvs
                     iteration_count = 0
+                    
+                    # Create a placeholder for status messages
+                    status_placeholder = st.empty()
                     
                     # Compute correlations for each pair of variables
                     for i in range(n_vars):
@@ -570,7 +629,7 @@ else:
                             for pv_idx in range(num_pvs):
                                 var1 = var1_list[pv_idx % len(var1_list)]
                                 var2 = var2_list[pv_idx % len(var2_list)]
-                                st.write(f"Processing correlation between {var1} and {var2}...")
+                                status_placeholder.write(f"Processing correlation between {var1} and {var2}...")
                                 
                                 # Create a subset DataFrame for just this pair to ensure consistent NA handling
                                 pair_columns = ['W_FSTUWT']
@@ -586,7 +645,9 @@ else:
                                     all_p_values.append(np.nan)
                                     all_se.append(np.nan)
                                     iteration_count += 1
-                                    pv_progress.progress(iteration_count / total_iterations)
+                                    # Avoid division by zero in progress calculation
+                                    if total_iterations > 0:
+                                        pv_progress.progress(min(0.7 * (iteration_count / total_iterations), 0.7))
                                     continue
                                 
                                 x = pair_data[var1].values
@@ -594,9 +655,8 @@ else:
                                 w = pair_data['W_FSTUWT'].values
                                 corr, p_value = weighted_correlation(x, y, w)
                                 if st.session_state.correlation_matrix_used_brr:
-                                    st.write("Calculating standard error using replicate weights...")
-                                    brr_progress = st.progress(0)
-                                    se = compute_brr_se_correlation(x, y, replicate_weight_cols, pair_data, brr_progress)
+                                    status_placeholder.write("Calculating standard error using replicate weights...")
+                                    se = compute_brr_se_correlation(x, y, replicate_weight_cols, pair_data)
                                     p_value = compute_brr_p_value(corr, se, len(pair_data))
                                 else:
                                     se = np.nan  # Not used in simple method
@@ -606,18 +666,20 @@ else:
                                 all_se.append(se)
                                 
                                 iteration_count += 1
-                                pv_progress.progress(iteration_count / total_iterations)
+                                # Avoid division by zero in progress calculation
+                                if total_iterations > 0:
+                                    pv_progress.progress(min(0.7 * (iteration_count / total_iterations), 0.7))
                         
                             # Combine results
                             if num_pvs == 1:
                                 # For non-PV variables, use the single correlation and p-value directly
-                                st.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]} (single iteration, no plausible values)...")
+                                status_placeholder.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]} (single iteration, no plausible values)...")
                                 combined_corr = all_corrs[0]
                                 combined_p_value = all_p_values[0]
                                 combined_se = all_se[0]
                             else:
                                 # For PV variables, apply Rubin's rules
-                                st.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]}...")
+                                status_placeholder.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]}...")
                                 combined_corr, combined_se, combined_p_value = apply_rubins_rules_correlations(all_corrs, all_se, len(pair_data))
                             
                             # Store in matrices
@@ -625,6 +687,9 @@ else:
                             corr_matrix[j, i] = combined_corr
                             p_matrix[i, j] = combined_p_value
                             p_matrix[j, i] = combined_p_value
+                    
+                    # Update progress bar after correlation computation
+                    pv_progress.progress(0.9)  # 90% after rendering the table
                     
                     # Store results in session state
                     st.session_state.correlation_matrix_results = {
@@ -635,51 +700,15 @@ else:
                     }
                     st.session_state.correlation_matrix_completed = True
                     
-                    # Render the correlation matrix  
-                                        # Render the correlation matrix  
-                    st.write("Rendering correlation matrix...")  
-                    table_html = render_correlation_matrix(selected_labels, corr_matrix, p_matrix)  
-                    # Calculate height based on number of variables (approximately 30px per row plus some padding)  
-                    matrix_height = len(selected_labels) * 90 + 30 
-                    components.html(table_html, height=matrix_height, scrolling=True)  
-                    st.write("Correlation matrix analysis completed.")  
-                      
-                    # Generate scatter plots for all pairs  
-                    st.header("Scatter plots for all variable pairs:")  
-                      
-                    # Create pairs of variables  
-                    n_vars = len(selected_labels)  
-                    for i in range(n_vars):  
-                        for j in range(i+1, n_vars):  # Only do upper triangle to avoid duplicates  
-                            var1_label = selected_labels[i]  
-                            var2_label = selected_labels[j]  
-                            var1_code = selected_codes[i]  
-                            var2_code = selected_codes[j]  
-                              
-                            # Handle plausible value domains  
-                            if var1_code in pv_domains:  
-                                var1_data = df[pv_domains[var1_code][0]]  
-                            else:  
-                                var1_data = df[var1_code]  
-                                  
-                            if var2_code in pv_domains:  
-                                var2_data = df[pv_domains[var2_code][0]]  
-                            else:  
-                                var2_data = df[var2_code]  
-                              
-                            # Create plot dataframe  
-                            plot_df = pd.DataFrame({  
-                                var1_code: var1_data,  
-                                var2_code: var2_data,  
-                                'weights': df['W_FSTUWT']  
-                            }).dropna()  
-                              
-                            # Create scatter plot  
-                            fig = create_weighted_scatter(plot_df, var1_code, var2_code,   
-                                                        plot_df['weights'], var1_label, var2_label)  
-                            st.pyplot(fig)  
+                    # Render the correlation matrix
+                    status_placeholder.write("Rendering correlation matrix...")
+                    table_html = render_correlation_matrix(selected_labels, corr_matrix, p_matrix)
+                    # Calculate height based on number of variables (approximately 90px per row plus some padding)
+                    matrix_height = len(selected_labels) * 90 + 30
+                    components.html(table_html, height=matrix_height, scrolling=True)
+                    status_placeholder.write("Correlation matrix analysis completed.")
                     
-                    # Provide download button for Word document
+                    # Provide download button for Word document (moved here)
                     doc_buffer = create_word_table(selected_labels, corr_matrix, p_matrix)
                     st.download_button(
                         label="Download Table as Word Document",
@@ -687,6 +716,86 @@ else:
                         file_name="Correlation_Matrix_Table.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )
+                    
+                    # Generate scatter plots for all pairs in a 2-column grid
+                    st.header("Scatter plots for all variable pairs:")
+                    variable_pairs = list(itertools.combinations(range(n_vars), 2))
+                    status_placeholder.write(f"Generating scatter plots for {len(variable_pairs)} pairs of variables.")
+                    
+                    for idx in range(0, len(variable_pairs), 2):
+                        # Create a row with 2 columns
+                        cols = st.columns(2)
+                        
+                        # First plot in the row
+                        i, j = variable_pairs[idx]
+                        var1_label = selected_labels[i]
+                        var2_label = selected_labels[j]
+                        var1_code = selected_codes[i]
+                        var2_code = selected_codes[j]
+                        
+                        # Handle plausible value domains
+                        if var1_code in pv_domains:
+                            var1_data = df[pv_domains[var1_code][0]]
+                        else:
+                            var1_data = df[var1_code]
+                        
+                        if var2_code in pv_domains:
+                            var2_data = df[pv_domains[var2_code][0]]
+                        else:
+                            var2_data = df[var2_code]
+                        
+                        # Create plot dataframe step-by-step
+                        data_dict = {
+                            var1_code: var1_data,
+                            var2_code: var2_data,
+                            'weights': df['W_FSTUWT']
+                        }
+                        plot_df = pd.DataFrame(data_dict)
+                        plot_df = plot_df.dropna()
+                        
+                        # Create scatter plot
+                        fig1 = create_weighted_scatter(plot_df, var1_code, var2_code, 
+                                                      plot_df['weights'], var1_label, var2_label)
+                        with cols[0]:
+                            st.pyplot(fig1)
+                        
+                        # Second plot in the row (if available)
+                        if idx + 1 < len(variable_pairs):
+                            i, j = variable_pairs[idx + 1]
+                            var1_label = selected_labels[i]
+                            var2_label = selected_labels[j]
+                            var1_code = selected_codes[i]
+                            var2_code = selected_codes[j]
+                            
+                            # Handle plausible value domains
+                            if var1_code in pv_domains:
+                                var1_data = df[pv_domains[var1_code][0]]
+                            else:
+                                var1_data = df[var1_code]
+                            
+                            if var2_code in pv_domains:
+                                var2_data = df[pv_domains[var2_code][0]]
+                            else:
+                                var2_data = df[var2_code]
+                            
+                            # Create plot dataframe step-by-step
+                            data_dict = {
+                                var1_code: var1_data,
+                                var2_code: var2_data,
+                                'weights': df['W_FSTUWT']
+                            }
+                            plot_df = pd.DataFrame(data_dict)
+                            plot_df = plot_df.dropna()
+                            
+                            # Create scatter plot
+                            fig2 = create_weighted_scatter(plot_df, var1_code, var2_code, 
+                                                          plot_df['weights'], var1_label, var2_label)
+                            with cols[1]:
+                                st.pyplot(fig2)
+                    
+                    # Update progress bar to 100% after scatter plots
+                    pv_progress.progress(1.0)  # 100% after scatter plots are generated
+                    status_placeholder.empty()  # Clear the placeholder after completion
             except Exception as e:
                 st.error(f"Error computing correlation matrix: {str(e)}")
                 st.session_state.correlation_matrix_completed = False
@@ -702,7 +811,7 @@ else:
                 components.html(table_html, height=400, scrolling=True)
                 st.write("Correlation matrix analysis completed.")
                 
-                # Provide download button for Word document
+                # Provide download button for Word document (moved here)
                 doc_buffer = create_word_table(
                     results['labels'],
                     results['corr_matrix'],

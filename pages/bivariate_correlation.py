@@ -13,6 +13,12 @@ from docx.enum.section import WD_ORIENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
+# At the top of descriptive_statistics.py, after imports
+try:
+    st.logo("assets/logo.png")
+except Exception as e:
+    st.error(f"Failed to load logo: {e}")
+
 # Streamlit app configuration
 st.set_page_config(page_title="Bivariate Correlation - PISA Data Exploration Tool", layout="wide")
 

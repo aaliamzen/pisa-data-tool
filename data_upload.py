@@ -8,8 +8,15 @@ import html
 import re
 from scipy.stats import norm
 
+# Add logo that persists across all pages
+try:
+    st.logo("assets/logo.png")  # Replace with the path to your logo file, e.g., "assets/logo.png"
+except Exception as e:
+    st.error(f"Failed to load logo: {e}")
+
 # Streamlit app configuration
 st.set_page_config(page_title="PISA Data Exploration Tool", layout="wide")
+
 
 # Initialize session state for data
 if 'df' not in st.session_state:
