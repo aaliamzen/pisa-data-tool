@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np  
 import matplotlib.pyplot as plt  
 import seaborn as sns
+import textwrap
+from io import BytesIO
 from docx import Document  
 from docx.shared import Pt, Inches  
 from docx.enum.section import WD_ORIENT  
@@ -286,7 +288,7 @@ def create_apa_table_html(df, title="Descriptive Statistics for Selected Variabl
     # Dynamically create headers
     for col in df.columns:
         # Italicize statistical notation if present
-        if col in ['N', 'M', 'SD', 'Mean']:
+        if col in ['N', 'M', 'SD', 'Mean', 'Mode', 'Median']:
             html += f'<th><em>{col}</em></th>'
         else:
             html += f'<th>{col}</th>'
@@ -352,7 +354,7 @@ if selected_variables:
  
 # Show weighted plots for each variable    
     for var, label in zip(selected_variables, selected_labels):  
-        st.markdown(f"#### {label}")  # Using smaller header as discussed  
+        #st.markdown(f"#### {label}")  # Using smaller header as discussed  
           
         if not is_categorical(df[var]):  
             # Your existing numeric visualization code  
@@ -379,34 +381,83 @@ if selected_variables:
             mask = df[var].notna() & df["W_FSTUWT"].notna()  
             cats = df.loc[mask, var]  
             w = df.loc[mask, "W_FSTUWT"]  
-              
+
             # Calculate weighted frequencies and percentages  
             freq = cats.groupby(cats).apply(lambda x: w.loc[x.index].sum())  
             total = freq.sum()  
             percentages = (freq / total * 100)  
-              
+
             # Sort by frequency (you might want to skip this for ordinal variables)  
-            freq = freq.sort_values(ascending=True)  # Changed to True for better visualization  
-            percentages = percentages[freq.index]  
-              
-            # Create the plot  
-            fig, ax = plt.subplots(figsize=(6, 3))  
-              
+            #freq = freq.sort_values(ascending=True)  # Changed to True for better visualization  
+            #percentages = percentages[freq.index]  
+
+            # Calculate the number of categories  
+            num_categories = len(freq)  
+
+            # Dynamically calculate the plot height based on the number of categories  
+            base_height = 2.5  # Height for 2 categories  
+            base_num_categories = 2  
+            height_per_category = 0.5  # Additional height per category  
+            height = max(1.0, base_height + (num_categories - base_num_categories) * height_per_category)  # Ensure minimum height of 1  
+
+            # Create the plot with a dynamic height  
+            fig, ax = plt.subplots(figsize=(4, height))  # Width is 5, height is dynamic
+            
             # Convert category labels if value labels exist  
             if var in value_labels:  
                 freq.index = [value_labels[var].get(val, val) for val in freq.index]  
-              
+
+            # Wrap y-axis labels if they exceed 20 characters  
+            wrapped_labels = [textwrap.fill(str(label), width=20) for label in freq.index]  
+
             # Create horizontal bar plot  
             bars = ax.barh(range(len(freq)), freq.values, color="skyblue", edgecolor="black")  
-              
-            # Add percentage labels  
+
+            # Add padding to the x-axis to create space for labels  
+            max_freq = max(freq.values)  
+            ax.set_xlim(0, max_freq * 1.2)  # 50% padding on the right  
+
+            # Calculate a proportional offset for outside labels (10% of max_freq)  
+            outside_offset = max_freq * 0.03  # Proportional offset to ensure visibility  
+            if outside_offset < 1:  # Ensure a minimum offset for small scales  
+                outside_offset = 1  
+
+            # Add percentage labels, dynamically positioning to avoid border overlap  
             for i, (v, p) in enumerate(zip(freq.values, percentages)):  
-                ax.text(v, i, f' {p:.1f}%', va='center')  
-              
-            ax.set_title(f"Weighted Frequencies for {label}")  
-            ax.set_xlabel("Weighted Count")  
+                # Calculate the threshold for placing the label inside (e.g., within 5% of the max x-limit)  
+                xlim_max = ax.get_xlim()[1]  
+                margin = 0.05 * xlim_max  # 5% of the x-axis max as the margin  
+                if v > xlim_max - margin:  
+                    # Place inside the bar, align right, white text for readability  
+                    ax.text(v - 1.5, i, f'{p:.1f}% ', ha='right', va='center', fontsize=7, color='white')  
+                else:  
+                    # Place outside the bar with a proportional offset  
+                    label_pos = v + outside_offset  
+                    print(f"Label position (outside): {label_pos}")  
+                    ax.text(label_pos, i, f'{p:.1f}%', va='center', fontsize=7)  
+
+            # Set title and axis labels with reduced font size  
+            ax.set_title(f"Weighted Frequencies for {label}", fontsize=7)  
+            ax.set_xlabel("Weighted Count", fontsize=7)  
             ax.set_yticks(range(len(freq)))  
-            ax.set_yticklabels(freq.index)  
-              
-            plt.tight_layout()  
-            st.pyplot(fig)  
+            ax.set_yticklabels(wrapped_labels, fontsize=7)  # Use wrapped labels with reduced font size  
+            ax.tick_params(axis='x', labelsize=7)  # Reduced font size for x-tick labels  
+
+            # Adjust plot margins to ensure space for labels  
+            plt.subplots_adjust(right=0.85)  # Leave 15% space on the right for labels
+            
+            # Use st.columns to make the plot half the window width  
+            col1, col2 = st.columns(2)  # Create two equal columns (each 50% of the window width)  
+            with col1:  
+                st.pyplot(fig)  # Plot in the first column, which is half the window width
+
+            # Close the figure to free memory  
+            plt.close(fig)
+            
+# Instructions section
+st.header("Instructions")
+st.markdown("""
+- **Select Variables**: Choose any variables - continous and categorical variables will be handled differently.
+- **View Results**: Results are displayed in an APA-style table with with relevant statistics that describe the sample. You can copy and past the table directly into a Word document.
+- **Review visualsation**: Bar charts, histograms, and box plots are provided as appropriate.
+""")
