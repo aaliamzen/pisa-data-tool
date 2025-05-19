@@ -8,13 +8,6 @@ from scipy.stats import t, anderson, probplot
 from statsmodels.stats.diagnostic import het_breuschpagan
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from io import BytesIO
-from docx import Document
-from docx.shared import Pt, Inches
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.section import WD_ORIENT
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
 import matplotlib.pyplot as plt
 import seaborn as sns
 import base64
@@ -238,15 +231,16 @@ def apply_rubins_rules_regression(all_results, n, var_names):
             coefs_list = [result[1] for result in var_result]  # Unstandardized coefficients
             std_coefs_list = [result[2] for result in var_result]  # Standardized coefficients
             se_list = [result[3] for result in var_result]
+            missing_pct_list = [result[5] for result in var_result]  # Missing percentages
             
             # Skip if all coefficients are NaN
             if np.all(np.isnan(coefs_list)):
-                combined_results.append((var, np.nan, np.nan, np.nan, np.nan))
+                combined_results.append((var, np.nan, np.nan, np.nan, np.nan, np.nan))
                 continue
             
             num_pvs = len([c for c in coefs_list if not np.isnan(c)])
             if num_pvs == 0:
-                combined_results.append((var, np.nan, np.nan, np.nan, np.nan))
+                combined_results.append((var, np.nan, np.nan, np.nan, np.nan, np.nan))
                 continue
             
             # Combined point estimate (unstandardized coefficient)
@@ -275,7 +269,11 @@ def apply_rubins_rules_regression(all_results, n, var_names):
             # Compute p-value
             p_value = compute_brr_p_value(combined_coef, combined_se, n)
             
-            combined_results.append((var, combined_coef, combined_std_coef, combined_se, p_value))
+            # Average missing percentage across PVs, avoiding empty slice warning
+            non_none_missing_pcts = [pct for pct in missing_pct_list if pct is not None]
+            missing_pct = np.nanmean(non_none_missing_pcts) if non_none_missing_pcts else None
+            
+            combined_results.append((var, combined_coef, combined_std_coef, combined_se, p_value, missing_pct))
         
         # Average R-squared and adjusted R-squared across PVs
         r_squared = np.nanmean(r_squared_list)
@@ -308,7 +306,7 @@ def apply_rubins_rules_regression(all_results, n, var_names):
         return combined_results, r_squared, r_squared_adj, combined_diagnostics
     except Exception as e:
         st.error(f"Error in apply_rubins_rules_regression: {str(e)}")
-        return [(var, np.nan, np.nan, np.nan, np.nan) for var in ['Intercept'] + var_names], np.nan, np.nan, {}
+        return [(var, np.nan, np.nan, np.nan, np.nan, np.nan) for var in ['Intercept'] + var_names], np.nan, np.nan, {}
 
 # Function to plot to base64
 def plot_to_base64():
@@ -339,11 +337,28 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
                 # For regular variables, use the label from code_to_label
                 indep_var_labels.append(code_to_label.get(var, var))
         
+        # Initialize dictionary to store missing data percentages
+        missing_percentages = {}
+        
+        # Store original dataset size
+        original_size = len(df)
+        
         # If neither dependent nor independent vars are PVs, run a single regression
         if not dep_is_pv and not any(indep_is_pv):
-            data = df[[dependent_var] + independent_vars + ['W_FSTUWT'] + replicate_weights].dropna()
+            # Subset data and drop rows with missing values
+            data = df[[dependent_var] + independent_vars + ['W_FSTUWT'] + replicate_weights].copy()
+            total_rows = len(data)
+            data = data.dropna()
+            final_size = len(data)  # Final sample size after listwise deletion
             if len(data) < 2:
                 raise ValueError("Insufficient non-missing data for regression.")
+            
+            # Calculate missing data percentages for each variable
+            missing_dep = (total_rows - len(df[dependent_var].dropna())) / total_rows * 100
+            missing_percentages[dependent_var] = missing_dep
+            for var in independent_vars:
+                missing_var = (total_rows - len(df[var].dropna())) / total_rows * 100
+                missing_percentages[var] = missing_var
             
             X = data[independent_vars].values
             y = data[dependent_var].values
@@ -360,22 +375,28 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
                 for idx, (var, coef, std_coef, _, _) in enumerate(results):
                     se = brr_se[idx]
                     p_value = compute_brr_p_value(coef, se, len(data))
-                    # Replace variable code with label
+                    # Replace variable code with label and add missing percentage
                     if idx == 0:  # Intercept
                         updated_var = var
+                        missing_pct = None  # No missing percentage for Intercept
                     else:
                         updated_var = indep_var_labels[idx - 1]
-                    updated_results.append((updated_var, coef, std_coef, se, p_value))
+                        var_code = independent_vars[idx - 1]
+                        missing_pct = missing_percentages.get(var_code, 0.0)
+                    updated_results.append((updated_var, coef, std_coef, se, p_value, missing_pct))
                 results = updated_results
             else:
-                # Replace variable codes with labels in the results
+                # Replace variable codes with labels in the results and add missing percentage
                 updated_results = []
                 for idx, (var, coef, std_coef, se, p_value) in enumerate(results):
                     if idx == 0:  # Intercept
                         updated_var = var
+                        missing_pct = None
                     else:
                         updated_var = indep_var_labels[idx - 1]
-                    updated_results.append((updated_var, coef, std_coef, se, p_value))
+                        var_code = independent_vars[idx - 1]
+                        missing_pct = missing_percentages.get(var_code, 0.0)
+                    updated_results.append((updated_var, coef, std_coef, se, p_value, missing_pct))
                 results = updated_results
             
             # Generate visualizations using the final model
@@ -406,7 +427,7 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
             plt.title("Histogram of Residuals")
             visualizations['resid_histogram'] = plot_to_base64()
             
-            return results, r_squared, r_squared_adj, diagnostics, visualizations
+            return results, r_squared, r_squared_adj, diagnostics, visualizations, final_size, original_size
         
         # If either dependent or independent vars are PVs, handle PV analysis
         pv_domain = None
@@ -434,9 +455,12 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
         iteration_count = 0
         
         all_results = []
+        final_size = 0  # Initialize final_size for PV case
         for pv_idx in pv_nums:
             pv_var = f"PV{pv_idx}{pv_domain}"
             if pv_var not in df.columns:
+                iteration_count += 1
+                pv_progress.progress(iteration_count / total_iterations)
                 continue
             
             if status_placeholder:
@@ -463,12 +487,22 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
             columns = [dep_var] + indep_vars + ['W_FSTUWT']
             if use_brr:
                 columns += replicate_weights
-            data = df[columns].dropna()
+            data = df[columns].copy()
+            total_rows = len(data)
+            data = data.dropna()
+            final_size = len(data)  # Final sample size after listwise deletion
             if len(data) < 2:
                 st.warning(f"Insufficient non-missing data for regression with {pv_var}.")
                 iteration_count += 1
                 pv_progress.progress(iteration_count / total_iterations)
                 continue
+            
+            # Calculate missing data percentages for each variable
+            missing_dep = (total_rows - len(df[dep_var].dropna())) / total_rows * 100
+            missing_percentages[dep_var] = missing_dep
+            for var in indep_vars:
+                missing_var = (total_rows - len(df[var].dropna())) / total_rows * 100
+                missing_percentages[var] = missing_var
             
             X = data[indep_vars].values
             y = data[dep_var].values
@@ -485,22 +519,28 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
                 for idx, (var, coef, std_coef, _, _) in enumerate(results):
                     se = brr_se[idx]
                     p_value = compute_brr_p_value(coef, se, len(data))
-                    # Replace variable code with label
+                    # Replace variable code with label and add missing percentage
                     if idx == 0:  # Intercept
                         updated_var = var
+                        missing_pct = None  # No missing percentage for Intercept
                     else:
                         updated_var = indep_var_labels[idx - 1]
-                    updated_results.append((updated_var, coef, std_coef, se, p_value))
+                        var_code = indep_vars[idx - 1]
+                        missing_pct = missing_percentages.get(var_code, 0.0)
+                    updated_results.append((updated_var, coef, std_coef, se, p_value, missing_pct))
                 results = updated_results
             else:
-                # Replace variable codes with labels in the results
+                # Replace variable codes with labels in the results and add missing percentage
                 updated_results = []
                 for idx, (var, coef, std_coef, se, p_value) in enumerate(results):
                     if idx == 0:  # Intercept
                         updated_var = var
+                        missing_pct = None
                     else:
                         updated_var = indep_var_labels[idx - 1]
-                    updated_results.append((updated_var, coef, std_coef, se, p_value))
+                        var_code = indep_vars[idx - 1]
+                        missing_pct = missing_percentages.get(var_code, 0.0)
+                    updated_results.append((updated_var, coef, std_coef, se, p_value, missing_pct))
                 results = updated_results
             
             all_results.append((results, r_squared, r_squared_adj, diagnostics))
@@ -549,13 +589,13 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
         plt.title("Histogram of Residuals")
         visualizations['resid_histogram'] = plot_to_base64()
         
-        return combined_results, combined_r_squared, combined_r_squared_adj, combined_diagnostics, visualizations
+        return combined_results, combined_r_squared, combined_r_squared_adj, combined_diagnostics, visualizations, final_size, original_size
     except Exception as e:
         st.error(f"Error in compute_linear_regression_with_pvs: {str(e)}")
-        return [(var, np.nan, np.nan, np.nan, np.nan) for var in ['Intercept'] + independent_vars], np.nan, np.nan, {}, {}
+        return [(var, np.nan, np.nan, np.nan, np.nan, None) for var in ['Intercept'] + independent_vars], np.nan, np.nan, {}, {}, 0, 0
 
 # Function to render regression table as HTML
-def render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics):
+def render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, final_size, original_size):
     html_content = """
     <style>
     .reg-table-container {
@@ -632,21 +672,24 @@ def render_regression_table(dependent_var_label, results, r_squared, r_squared_a
                 <th><i>β</i></th>
                 <th><i>SE</i></th>
                 <th><i>p</i></th>
+                <th>% Missing</th>
             </tr>
             {{data_rows}}
         </table>
         <div class="reg-table-note"><i>Note.</i> <i>R²</i> = {{r_squared}}, Adjusted <i>R²</i> = {{r_squared_adj}}</div>
         <div class="reg-table-note">Model: <i>F</i>({{df_model}}, {{df_resid}}) = {{f_stat}}, <i>p</i> = {{f_pvalue}}</div>
         <div class="reg-table-note">Assumptions: Anderson-Darling: <i>A²</i> = {{ad_stat}}, Normality Rejected at 5% = {{ad_reject}}; Breusch-Pagan: <i>LM</i> = {{bp_lm_stat}}, <i>p</i> = {{bp_pvalue}}; Max <i>VIF</i> = {{max_vif}}</div>
+        <div class="reg-table-note">Sample Size: Final N = {{final_size}} ({{percent_retained}}% of original N = {{original_size}} after listwise deletion)</div>
     </div>
     """
     data_rows = ""
-    for idx, (var, coef, std_coef, se, p_value) in enumerate(results):
+    for idx, (var, coef, std_coef, se, p_value, missing_pct) in enumerate(results):
         coef_display = f"{coef:.2f}" if not np.isnan(coef) else "-"
         std_coef_display = f"{std_coef:.2f}" if not np.isnan(std_coef) else "-"
         se_display = f"{se:.2f}" if not np.isnan(se) else "-"
         p_display = "< .001" if p_value < 0.001 else f"{p_value:.2f}" if not np.isnan(p_value) else "-"
         sig_display = "**" if p_value < 0.01 else "*" if p_value < 0.05 else "" if not np.isnan(p_value) else ""
+        missing_display = f"{missing_pct:.1f}" if missing_pct is not None and not np.isnan(missing_pct) else "-"
         row_class = "reg-table-last-row" if idx == len(results) - 1 else ""
         row = f"""
         <tr class="{row_class}">
@@ -655,6 +698,7 @@ def render_regression_table(dependent_var_label, results, r_squared, r_squared_a
             <td>{std_coef_display}</td>
             <td>{se_display}</td>
             <td>{p_display}</td>
+            <td>{missing_display}</td>
         </tr>
         """
         data_rows += row
@@ -680,295 +724,13 @@ def render_regression_table(dependent_var_label, results, r_squared, r_squared_a
     max_vif = diagnostics.get('max_vif', np.nan)
     max_vif_display = f"{max_vif:.2f}" if not np.isnan(max_vif) else "-"
     
-    full_html = html_content.replace("{{dependent_var}}", dependent_var_label).replace("{{data_rows}}", data_rows).replace("{{r_squared}}", r_squared_display).replace("{{r_squared_adj}}", r_squared_adj_display).replace("{{f_stat}}", f_stat_display).replace("{{f_pvalue}}", f_pvalue_display).replace("{{df_model}}", df_model_display).replace("{{df_resid}}", df_resid_display).replace("{{ad_stat}}", ad_stat_display).replace("{{ad_reject}}", ad_reject_display).replace("{{bp_lm_stat}}", bp_lm_stat_display).replace("{{bp_pvalue}}", bp_pvalue_display).replace("{{max_vif}}", max_vif_display)
+    # Calculate percentage of original dataset retained
+    percent_retained = (final_size / original_size * 100) if original_size > 0 else 0
+    percent_retained_display = f"{percent_retained:.1f}"
+    
+    full_html = html_content.replace("{{dependent_var}}", dependent_var_label).replace("{{data_rows}}", data_rows).replace("{{r_squared}}", r_squared_display).replace("{{r_squared_adj}}", r_squared_adj_display).replace("{{f_stat}}", f_stat_display).replace("{{f_pvalue}}", f_pvalue_display).replace("{{df_model}}", df_model_display).replace("{{df_resid}}", df_resid_display).replace("{{ad_stat}}", ad_stat_display).replace("{{ad_reject}}", ad_reject_display).replace("{{bp_lm_stat}}", bp_lm_stat_display).replace("{{bp_pvalue}}", bp_pvalue_display).replace("{{max_vif}}", max_vif_display).replace("{{final_size}}", str(final_size)).replace("{{original_size}}", str(original_size)).replace("{{percent_retained}}", percent_retained_display)
     
     return full_html
-
-# Function to set cell borders in Word document
-def set_cell_border(cell, top=False, bottom=False, left=False, right=False):
-    tc = cell._element
-    tcPr = tc.get_or_add_tcPr()
-    
-    # Remove existing borders
-    for border in ['top', 'bottom', 'left', 'right']:
-        existing_border = tcPr.find(qn(f'w:{border}'))
-        if existing_border is not None:
-            tcPr.remove(existing_border)
-    
-    # Set new borders where specified
-    if top:
-        border = OxmlElement('w:top')
-        border.set(qn('w:val'), 'single')
-        border.set(qn('w:sz'), '4')  # Border width in eighths of a point
-        tcPr.append(border)
-    if bottom:
-        border = OxmlElement('w:bottom')
-        border.set(qn('w:val'), 'single')
-        border.set(qn('w:sz'), '4')
-        tcPr.append(border)
-    if left:
-        border = OxmlElement('w:left')
-        border.set(qn('w:val'), 'single')
-        border.set(qn('w:sz'), '4')
-        tcPr.append(border)
-    if right:
-        border = OxmlElement('w:right')
-        border.set(qn('w:val'), 'single')
-        border.set(qn('w:sz'), '4')
-        tcPr.append(border)
-
-# Function to create a Word document with the APA-style table
-def create_word_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, visualizations):
-    doc = Document()
-    
-    # Set document to landscape orientation
-    section = doc.sections[0]
-    section.orientation = WD_ORIENT.LANDSCAPE
-    section.page_width = Inches(11)
-    section.page_height = Inches(8.5)
-    
-    # Add title
-    title = doc.add_paragraph("Table 1")
-    title.runs[0].bold = True
-    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    title.runs[0].font.name = 'Times New Roman'
-    title.runs[0].font.size = Pt(10)
-    
-    # Add subtitle
-    subtitle = doc.add_paragraph(f"Weighted Linear Regression Results for Dependent Variable: {dependent_var_label}")
-    subtitle.runs[0].italic = True
-    subtitle.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    subtitle.runs[0].font.name = 'Times New Roman'
-    subtitle.runs[0].font.size = Pt(10)
-    
-    # Create table
-    table = doc.add_table(rows=1 + len(results), cols=5)
-    table.alignment = WD_TABLE_ALIGNMENT.LEFT
-    table.style = 'Normal Table'  # Use a style with no borders
-    
-    # Set column widths
-    for column in table.columns:
-        for cell in column.cells:
-            cell.width = Inches(1.2)  # Adjusted for landscape orientation and additional column
-    
-    # Add header row
-    headers = ["Variable", "B", "β", "SE", "p"]
-    for idx, header in enumerate(headers):
-        cell = table.rows[0].cells[idx]
-        p = cell.paragraphs[0]
-        if header in ["B", "β", "SE", "p"]:
-            # Create a run for the italicized text
-            run = p.add_run(header)
-            run.font.name = 'Times New Roman'
-            run.font.size = Pt(10)
-            run.italic = True
-        else:
-            cell.text = header
-            cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
-            cell.paragraphs[0].runs[0].font.size = Pt(10)
-        cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        cell.paragraphs[0].runs[0].bold = False
-        set_cell_border(cell, top=True, bottom=True)
-    
-    # Add data rows
-    for idx, (var, coef, std_coef, se, p_value) in enumerate(results):
-        row = table.rows[idx + 1]
-        row.cells[0].text = var
-        coef_display = f"{coef:.2f}" if not np.isnan(coef) else "-"
-        std_coef_display = f"{std_coef:.2f}" if not np.isnan(std_coef) else "-"
-        se_display = f"{se:.2f}" if not np.isnan(se) else "-"
-        p_display = "< .001" if p_value < 0.001 else f"{p_value:.2f}" if not np.isnan(p_value) else "-"
-        sig_display = "**" if p_value < 0.01 else "*" if p_value < 0.05 else "" if not np.isnan(p_value) else ""
-        row.cells[1].text = f"{coef_display}{sig_display}"
-        row.cells[2].text = std_coef_display
-        row.cells[3].text = se_display
-        row.cells[4].text = p_display
-        for cell in row.cells:
-            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
-            cell.paragraphs[0].runs[0].font.size = Pt(10)
-            cell.paragraphs[0].runs[0].bold = False
-            if idx == len(results) - 1:
-                set_cell_border(cell, bottom=True)
-    
-    # Add note with R-squared and adjusted R-squared
-    r_squared_display = f"{r_squared:.3f}" if not np.isnan(r_squared) else "-"
-    r_squared_adj_display = f"{r_squared_adj:.3f}" if not np.isnan(r_squared_adj) else "-"
-    note = doc.add_paragraph()
-    note.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    
-    # Add "Note." (italicized)
-    run = note.add_run("Note.")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add space
-    run = note.add_run(" ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "R²" (italicized)
-    run = note.add_run("R²")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add " = {r_squared_display}, "
-    run = note.add_run(f" = {r_squared_display}, ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "Adjusted" (not italicized)
-    run = note.add_run("Adjusted ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "R²" (italicized)
-    run = note.add_run("R²")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add " = {r_squared_adj_display}"
-    run = note.add_run(f" = {r_squared_adj_display}")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add model fit note
-    f_stat, f_pvalue, df_model, df_resid = diagnostics.get('f_stat', (np.nan, np.nan, np.nan, np.nan))
-    f_stat_display = f"{f_stat:.2f}" if not np.isnan(f_stat) else "-"
-    f_pvalue_display = "< .001" if f_pvalue < 0.001 else f"{f_pvalue:.3f}" if not np.isnan(f_pvalue) else "-"
-    df_model_display = f"{int(df_model)}" if not np.isnan(df_model) else "-"
-    df_resid_display = f"{int(df_resid)}" if not np.isnan(df_resid) else "-"
-    
-    note2 = doc.add_paragraph()
-    note2.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    
-    # Add "Model: "
-    run = note2.add_run("Model: ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "F" (italicized)
-    run = note2.add_run("F")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add "({df_model}, {df_resid}) = {f_stat}, "
-    run = note2.add_run(f"({df_model_display}, {df_resid_display}) = {f_stat_display}, ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "p" (italicized)
-    run = note2.add_run("p")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add " = {f_pvalue}"
-    run = note2.add_run(f" = {f_pvalue_display}")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add assumptions note
-    ad_stat, ad_reject = diagnostics.get('anderson_darling', (np.nan, False))
-    ad_stat_display = f"{ad_stat:.2f}" if not np.isnan(ad_stat) else "-"
-    ad_reject_display = "Yes" if ad_reject else "No"
-    
-    bp_lm_stat, bp_pvalue = diagnostics.get('breusch_pagan', (np.nan, np.nan))
-    bp_lm_stat_display = f"{bp_lm_stat:.2f}" if not np.isnan(bp_lm_stat) else "-"
-    bp_pvalue_display = "< .001" if bp_pvalue < 0.001 else f"{bp_pvalue:.3f}" if not np.isnan(bp_pvalue) else "-"
-    
-    max_vif = diagnostics.get('max_vif', np.nan)
-    max_vif_display = f"{max_vif:.2f}" if not np.isnan(max_vif) else "-"
-    
-    note3 = doc.add_paragraph()
-    note3.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    
-    # Add "Assumptions: Anderson-Darling: "
-    run = note3.add_run("Assumptions: Anderson-Darling: ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "A²" (italicized)
-    run = note3.add_run("A²")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add " = {ad_stat}, "
-    run = note3.add_run(f" = {ad_stat_display}, ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "Normality Rejected at 5% = {ad_reject}; "
-    run = note3.add_run(f"Normality Rejected at 5% = {ad_reject_display}; ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "Breusch-Pagan: "
-    run = note3.add_run("Breusch-Pagan: ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "LM" (italicized)
-    run = note3.add_run("LM")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add " = {bp_lm_stat}, "
-    run = note3.add_run(f" = {bp_lm_stat_display}, ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "p" (italicized)
-    run = note3.add_run("p")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add " = {bp_pvalue}; "
-    run = note3.add_run(f" = {bp_pvalue_display}; ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "Max "
-    run = note3.add_run("Max ")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add "VIF" (italicized)
-    run = note3.add_run("VIF")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    run.italic = True
-    
-    # Add " = {max_vif}"
-    run = note3.add_run(f" = {max_vif_display}")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    # Add visualizations
-    if visualizations.get('qq_plot'):
-        doc.add_paragraph("Q-Q Plot of Residuals").alignment = WD_ALIGN_PARAGRAPH.LEFT
-        doc.add_picture(BytesIO(base64.b64decode(visualizations['qq_plot'])), width=Inches(4))
-    
-    if visualizations.get('resid_vs_fitted'):
-        doc.add_paragraph("Residuals vs. Fitted Values").alignment = WD_ALIGN_PARAGRAPH.LEFT
-        doc.add_picture(BytesIO(base64.b64decode(visualizations['resid_vs_fitted'])), width=Inches(4))
-    
-    if visualizations.get('resid_histogram'):
-        doc.add_paragraph("Histogram of Residuals").alignment = WD_ALIGN_PARAGRAPH.LEFT
-        doc.add_picture(BytesIO(base64.b64decode(visualizations['resid_histogram'])), width=Inches(4))
-    
-    # Save document to a BytesIO buffer
-    buffer = BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
 
 # Access data from session state
 df = st.session_state.get('df', None)
@@ -985,7 +747,7 @@ if 'regression_completed' in st.session_state:
 # Initialize session state for this page
 if 'regression_results' not in st.session_state:
     st.session_state.regression_results = None
-if 'regression_completed' in st.session_state:
+if 'regression_completed' not in st.session_state:
     st.session_state.regression_completed = False
 
 # Streamlit UI
@@ -1071,24 +833,47 @@ else:
     if len(all_var_options) < 2:
         st.warning("At least two numeric variables or domains are required for linear regression analysis.")
     else:
-        # Select Dependent Variable
+        # Select Dependent Variable (no default selection)
         st.write("Select the dependent variable:")
         dependent_var_label = st.selectbox(
             "Dependent Variable",
-            all_var_options,
-            index=0 if "Mathematics score" not in all_var_options else all_var_options.index("Mathematics score"),
+            [""] + all_var_options,  # Add empty option as the first choice
+            index=0,  # Default to empty selection
             key="dep_var"
         )
         
-        # Determine if the dependent variable is a domain or a regular variable
-        if dependent_var_label in label_to_domain:
-            dependent_var = pv_domains[label_to_domain[dependent_var_label]][0]  # Use the first PV (e.g., PV1MATH)
+        # If no dependent variable is selected, set to None to prevent further processing
+        if not dependent_var_label:
+            dependent_var = None
         else:
-            dependent_var = label_to_var[dependent_var_label]
+            # Determine if the dependent variable is a domain or a regular variable
+            if dependent_var_label in label_to_domain:
+                dependent_var = pv_domains[label_to_domain[dependent_var_label]][0]  # Use the first PV (e.g., PV1MATH)
+            else:
+                dependent_var = label_to_var[dependent_var_label]
         
-        # Select Covariates (default to ST004D01T and ESCS)
-        st.write("Select covariates (default: Student gender, ESCS):")
-        covariate_options = [label for label in all_var_options if label != dependent_var_label]
+        # Select Predictors (no "optional" label, blank by default)
+        st.write("Select predictors:")
+        predictor_options = [label for label in all_var_options if label != dependent_var_label]
+        predictor_labels = st.multiselect(
+            "Predictors",
+            predictor_options,
+            default=[],
+            key="predictors"
+        )
+        
+        # Map predictor labels to actual column names
+        predictors = []
+        for label in predictor_labels:
+            if label in label_to_domain:
+                domain = label_to_domain[label]
+                predictors.append(pv_domains[domain][0])
+            else:
+                predictors.append(label_to_var[label])
+        
+        # Select Covariates (at the bottom, labeled as optional, default to Student gender and ESCS)
+        st.write("Select covariates (optional):")
+        covariate_options = [label for label in all_var_options if label != dependent_var_label and label not in predictor_labels]
         # Map ST004D01T and ESCS to their labels
         default_covariates = []
         student_gender_label = variable_labels.get("ST004D01T", "ST004D01T")
@@ -1109,7 +894,7 @@ else:
             default_covariates.append(escs_label)
         
         covariate_labels = st.multiselect(
-            "Covariates",
+            "Covariates (optional)",
             covariate_options,
             default=default_covariates,
             key="covariates"
@@ -1125,31 +910,12 @@ else:
             else:
                 covariates.append(label_to_var[label])
         
-        # Select Predictors (optional, blank by default)
-        st.write("Select predictors (optional):")
-        predictor_options = [label for label in all_var_options if label != dependent_var_label and label not in covariate_labels]
-        predictor_labels = st.multiselect(
-            "Predictors (Optional)",
-            predictor_options,
-            default=[],
-            key="predictors"
-        )
-        
-        # Map predictor labels to actual column names
-        predictors = []
-        for label in predictor_labels:
-            if label in label_to_domain:
-                domain = label_to_domain[label]
-                predictors.append(pv_domains[domain][0])
-            else:
-                predictors.append(label_to_var[label])
-        
         # Combine covariates and predictors for the regression
         independent_vars = covariates + predictors
         
         run_analysis = st.button("Run Analysis", key="run_regression")
         
-        if run_analysis and independent_vars:
+        if run_analysis and independent_vars and dependent_var:
             try:
                 if 'W_FSTUWT' not in df.columns:
                     st.error("Final student weight (W_FSTUWT) not found in the dataset.")
@@ -1163,7 +929,7 @@ else:
                     status_placeholder = st.empty()
                     
                     # Compute regression with PVs and BRR, passing label_to_var for mapping and the placeholder
-                    results, r_squared, r_squared_adj, diagnostics, visualizations = compute_linear_regression_with_pvs(
+                    results, r_squared, r_squared_adj, diagnostics, visualizations, final_size, original_size = compute_linear_regression_with_pvs(
                         df, dependent_var, independent_vars, df['W_FSTUWT'], replicate_weight_cols, use_brr, label_to_var, status_placeholder
                     )
                     
@@ -1174,20 +940,13 @@ else:
                     st.session_state.r_squared_adj = r_squared_adj
                     st.session_state.diagnostics = diagnostics
                     st.session_state.visualizations = visualizations
+                    st.session_state.final_size = final_size
+                    st.session_state.original_size = original_size
                     
                     # Render the regression table
                     status_placeholder.write("Rendering regression table...")
-                    table_html = render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics)
+                    table_html = render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, final_size, original_size)
                     components.html(table_html, height=400, scrolling=True)
-                    
-                    # Provide download button for Word document
-                    doc_buffer = create_word_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, visualizations)
-                    st.download_button(
-                        label="Download Table as Word Document",
-                        data=doc_buffer,
-                        file_name="Linear_Regression_Table.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    )
                     
                     # Display visualizations without headers
                     if visualizations.get('qq_plot'):
@@ -1206,23 +965,16 @@ else:
                 st.session_state.regression_completed = False
                 st.session_state.regression_results = None
         elif st.session_state.regression_results and st.session_state.regression_completed:
-            if independent_vars:
+            if independent_vars and dependent_var:
                 results = st.session_state.regression_results
                 r_squared = st.session_state.get('r_squared', np.nan)
                 r_squared_adj = st.session_state.get('r_squared_adj', np.nan)
                 diagnostics = st.session_state.get('diagnostics', {})
                 visualizations = st.session_state.get('visualizations', {})
-                table_html = render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics)
+                final_size = st.session_state.get('final_size', 0)
+                original_size = st.session_state.get('original_size', 0)
+                table_html = render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, final_size, original_size)
                 components.html(table_html, height=400, scrolling=True)
-                
-                # Provide download button for Word document
-                doc_buffer = create_word_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, visualizations)
-                st.download_button(
-                    label="Download Table as Word Document",
-                    data=doc_buffer,
-                    file_name="Linear_Regression_Table.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
                 
                 # Display visualizations without headers
                 if visualizations.get('qq_plot'):
@@ -1235,17 +987,5 @@ else:
                     st.image(f"data:image/png;base64,{visualizations['resid_histogram']}")
                 
                 st.write("Linear regression analysis completed.")
-            else:
-                st.write("Please select at least one covariate to compute linear regression.")
         else:
-            st.write("Please select a dependent variable and at least one covariate, then click 'Run Analysis' to compute linear regression.")
-
-
-# Instructions section
-st.header("Instructions")
-st.markdown("""
-- **Select Variables**: Choose a dependent variable, covariates (default: Student gender, ESCS), and optional predictors from the dropdown menus. Plausible value domains (e.g., Mathematics score, Reading score) will use all 10 plausible values for analysis, combined using Rubin's rules.
-- **Run Analysis**: Click "Run Analysis" to perform the weighted linear regression analysis using student weights (W_FSTUWT). Standard errors will be computed using replicate weights if available.
-- **View Results**: Results are displayed in an APA-style table with coefficients, standard errors, and p-values rounded to 2 decimal places. You can download the table as a Word document using the download button.
-- **Navigate**: Use the sidebar to switch between different analysis types or return to the main page to upload a new dataset.
-""")
+            st.write("Please select a dependent variable and at least one covariate or predictor, then click 'Run Analysis' to perform the regression.")
