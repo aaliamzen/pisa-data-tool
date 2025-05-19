@@ -19,7 +19,7 @@ except Exception as e:
     st.error(f"Failed to load logo: {e}")
 
 # Streamlit app configuration
-st.set_page_config(page_title="Correlation Matrix - PISA Data Exploration Tool", layout="wide")
+st.set_page_config(page_title="Correlations - PISA Data Exploration Tool", layout="wide")
 
 # Function to determine if a variable is categorical
 def is_categorical(series, threshold=50):
@@ -369,7 +369,7 @@ def create_weighted_scatter(df, var1, var2, weights, var1_label, var2_label, cor
     return fig
 
 # Function to render correlation matrix as HTML table with superscript letters
-def render_correlation_matrix(selected_labels, corr_matrix, p_matrix, corr_types, type_to_letter):
+def render_correlation_matrix(selected_labels, corr_matrix, p_matrix, corr_types, type_to_letter, valid_cases, original_sample_size):
     html_content = """
     <style>
     table, th, td {  
@@ -449,9 +449,10 @@ def render_correlation_matrix(selected_labels, corr_matrix, p_matrix, corr_types
             </tr>
             {{data_rows}}
         </table>
-        <div class="corr-matrix-note">{{correlation_types_note}} Significance: *p < 0.01, **p < 0.001</div>
+        <div class="corr-matrix-note">{{correlation_types_note}}</div>
     </div>
     """
+    # ... (rest of the function remains unchanged)
     # Generate header row
     header_row = ""
     for label in selected_labels:
@@ -489,7 +490,7 @@ def render_correlation_matrix(selected_labels, corr_matrix, p_matrix, corr_types
         row += "</tr>"
         data_rows += row
     
-    # Generate the correlation types note
+    # Generate the correlation types note with case information
     corr_type_descriptions = {
         "pearson": "Pearson (continuous-continuous)",
         "point_biserial": "Point-Biserial (continuous-binary categorical)",
@@ -500,7 +501,14 @@ def render_correlation_matrix(selected_labels, corr_matrix, p_matrix, corr_types
     for corr_type, letter in type_to_letter.items():
         description = corr_type_descriptions.get(corr_type, "Unknown")
         note_parts.append(f"<sup>{letter}</sup>: {description}")
-    correlation_types_note = "Correlation types: " + "; ".join(note_parts) + "."
+    correlation_types_note = "Correlation types: " + "; ".join(note_parts) + ". "
+    # Add case information
+    if valid_cases is not None and original_sample_size > 0:
+        percentage = (valid_cases / original_sample_size) * 100
+        correlation_types_note += f"Number of cases analyzed (after listwise deletion): {valid_cases:,} out of {original_sample_size:,} ({percentage:.1f}% of original sample). "
+    else:
+        correlation_types_note += "Case information unavailable. "
+    correlation_types_note += "Significance: *p < 0.01, **p < 0.001."
     
     full_html = html_content.replace("{{header_row}}", header_row).replace("{{data_rows}}", data_rows).replace("{{correlation_types_note}}", correlation_types_note)
     return full_html
@@ -520,7 +528,7 @@ if 'correlation_matrix_used_brr' not in st.session_state:
     st.session_state.correlation_matrix_used_brr = False
 
 # Streamlit UI
-st.title("Correlation Matrix Analysis")
+st.title("Correlational Analysis")
 
 if df is None or df.empty:
     st.warning("No data available. Please upload a dataset on the main page.")
@@ -596,292 +604,341 @@ else:
         unique_var_labels.append(unique_label)
         label_to_var[unique_label] = col
     
+    # Display warning if insufficient variables
     if len(unique_var_labels) + len(domain_options) < 2:
-        st.warning("At least two numeric variables or domains are required for correlation matrix analysis.")
-    else:
-        # Select Variables (default to MATH domain only)
-        st.write("Select variables for correlation matrix (default: Mathematics score):")
-        all_var_options = domain_options + unique_var_labels
-        default_vars = []
-        if "Mathematics score" in all_var_options:
-            default_vars.append("Mathematics score")
-        
-        selected_var_labels = st.multiselect(
-            "Variables",
-            all_var_options,
-            default=default_vars,
-            key="matrix_vars"
-        )
-        
-        # Split selected variables into domains and regular variables
-        selected_domains = []
-        selected_vars = []
-        selected_labels = []
-        selected_codes = []
-        all_vars = []
-        variable_types = {}  # Store whether each variable is categorical and binary
-        
-        for label in selected_var_labels:
-            if label in label_to_domain:
-                domain = label_to_domain[label]
-                selected_domains.append(domain)
-                selected_labels.append(domain_to_label.get(domain, domain))
-                selected_codes.append(domain)
-                all_vars.append(pv_domains[domain])
-                # PV domains are treated as continuous
-                # Use the first plausible value to determine unique values
-                if pv_domains[domain]:  # Ensure the domain has at least one PV
-                    first_pv = pv_domains[domain][0]  # e.g., PV1MATH
-                    is_cat, is_bin, unique_count = is_categorical(df[first_pv])
-                else:
-                    is_cat, is_bin, unique_count = False, False, 0
-                variable_types[domain] = (is_cat, is_bin, unique_count)
+        st.warning("At least two numeric variables or domains are required for correlation analysis.")
+
+    # Define multiselect widget to ensure single instance
+    st.write("Select two or more variables for analysis:")
+    all_var_options = domain_options + unique_var_labels
+    selected_var_labels = st.multiselect(
+        "Variables",
+        all_var_options,
+        default=[],
+        key="matrix_vars"
+    )
+    
+    # Split selected variables into domains and regular variables
+    selected_domains = []
+    selected_vars = []
+    selected_labels = []
+    selected_codes = []
+    all_vars = []
+    variable_types = {}  # Store whether each variable is categorical and binary
+    
+    for label in selected_var_labels:
+        if label in label_to_domain:
+            domain = label_to_domain[label]
+            selected_domains.append(domain)
+            selected_labels.append(domain_to_label.get(domain, domain))
+            selected_codes.append(domain)
+            all_vars.append(pv_domains[domain])
+            # PV domains are treated as continuous
+            # Use the first plausible value to determine unique values
+            if pv_domains[domain]:  # Ensure the domain has at least one PV
+                first_pv = pv_domains[domain][0]  # e.g., PV1MATH
+                is_cat, is_bin, unique_count = is_categorical(df[first_pv])
             else:
-                var_code = label_to_var[label]
-                selected_vars.append(var_code)
-                selected_labels.append(label)
-                selected_codes.append(var_code)
-                all_vars.append([var_code])
-                # Determine if the variable is categorical
-                is_cat, is_bin, unique_count = is_categorical(df[var_code])
-                variable_types[var_code] = (is_cat, is_bin, unique_count)
-        
-        run_analysis = st.button("Run Analysis", key="run_correlation_matrix")
-        
-        if run_analysis and (selected_vars or selected_domains) and len(selected_var_labels) >= 2:
-            try:
-                if 'W_FSTUWT' not in df.columns:
-                    st.error("Final student weight (W_FSTUWT) not found in the dataset.")
-                else:
-                    # Check for replicate weights availability
-                    replicate_weight_cols = [f"W_FSTURWT{i}" for i in range(1, 81)]
-                    missing_weights = [col for col in replicate_weight_cols if col not in df.columns]
-                    st.session_state.correlation_matrix_used_brr = len(missing_weights) == 0  # Use BRR if no replicate weights are missing
-                    
-                    # Initialize correlation and p-value matrices
-                    n_vars = len(selected_var_labels)
-                    corr_matrix = np.ones((n_vars, n_vars))
-                    p_matrix = np.zeros((n_vars, n_vars))
-                    corr_types = {}  # Store correlation type for each pair
-                    type_to_letter = {}  # Map correlation types to superscript letters
-                    letter_counter = 0  # To assign letters a, b, c, etc.
-                    letters = 'abcdefghijklmnopqrstuvwxyz'
-                    
-                    # Compute the maximum number of plausible values
-                    max_pvs = max([len(vars) for vars in all_vars])
-                    
-                    # Calculate total work for the progress bar
-                    num_pairs = (n_vars * (n_vars - 1)) // 2
-                    pv_iterations = num_pairs * max_pvs  # Total PV iterations
-                    brr_iterations_per_pv = len(replicate_weight_cols) if st.session_state.correlation_matrix_used_brr else 0
-                    total_brr_iterations = pv_iterations * brr_iterations_per_pv
-                    total_work = pv_iterations + total_brr_iterations
-                    work_done = 0
-                    work_per_pv = 1  # Each PV iteration is 1 unit of work
-                    work_per_brr = 1 / len(replicate_weight_cols) if st.session_state.correlation_matrix_used_brr else 0  # Each BRR iteration is a fraction of a PV unit
-                    
-                    # Single main progress bar placeholder
-                    progress_placeholder = st.empty()
-                    progress_placeholder.progress(0.0)
-                    
-                    # Single placeholder for messages
-                    placeholder = st.empty()
-                    
-                    # Compute correlations for each pair of variables
-                    completed_pv_iterations = 0
-                    for i in range(n_vars):
-                        for j in range(i + 1, n_vars):
-                            var1_list = all_vars[i]
-                            var2_list = all_vars[j]
-                            var1_is_pv = len(var1_list) > 1
-                            var2_is_pv = len(var2_list) > 1
-                            num_pvs = max(len(var1_list), len(var2_list))
-                            
-                            all_corrs = []
-                            all_p_values = []  # Store p-values directly
-                            all_se = []
-                            base_correlation_type = None  # Store the intended correlation type before PV loop
-                            cat_var_index = None  # Store which variable is categorical (0 for var1, 1 for var2)
-                            
-                            # Determine variable types
-                            var1_code = selected_codes[i]
-                            var2_code = selected_codes[j]
-                            var1_is_cat, var1_is_binary, var1_unique_count = variable_types[var1_code]
-                            var2_is_cat, var2_is_binary, var2_unique_count = variable_types[var2_code]
-                            
-                            # Determine base correlation type (before PV loop)
-                            if not var1_is_cat and not var2_is_cat:
-                                base_correlation_type = "pearson"
-                                cat_var_index = None  # No categorical variable
-                            elif var1_is_cat and var2_is_cat:
-                                base_correlation_type = "cramers_v"
-                                cat_var_index = 0  # Both are categorical, default to var1 for consistency
-                            elif not var1_is_cat and var2_is_cat:
-                                if var2_is_binary:
-                                    base_correlation_type = "point_biserial"
-                                    cat_var_index = 1  # var2 is categorical
-                                else:
-                                    base_correlation_type = "pearson_approx"
-                                    cat_var_index = 1
-                                    placeholder.write(f"Using Pearson's correlation as an approximation for {selected_labels[i]} (continuous) vs. {selected_labels[j]} (non-binary categorical).")
-                            elif var1_is_cat and not var2_is_cat:
-                                if var1_is_binary:
-                                    base_correlation_type = "point_biserial"
-                                    cat_var_index = 0  # var1 is categorical
-                                else:
-                                    base_correlation_type = "pearson_approx"
-                                    cat_var_index = 0
-                                    placeholder.write(f"Using Pearson's correlation as an approximation for {selected_labels[i]} (non-binary categorical) vs. {selected_labels[j]} (continuous).")
-                            
-                            # Assign a superscript letter to this correlation type if not already assigned
-                            if base_correlation_type not in type_to_letter:
-                                if letter_counter < len(letters):
-                                    type_to_letter[base_correlation_type] = letters[letter_counter]
-                                    letter_counter += 1
-                            
-                            # Store correlation type for this pair
-                            corr_types[(i, j)] = base_correlation_type
-                            corr_types[(j, i)] = base_correlation_type
-                            
-                            for pv_idx in range(num_pvs):
-                                var1 = var1_list[pv_idx % len(var1_list)]
-                                var2 = var2_list[pv_idx % len(var2_list)]
-                                placeholder.write(f"Processing correlation between {var1} and {var2}...")
-                                
-                                # Create a subset DataFrame for just this pair to ensure consistent NA handling
-                                pair_columns = ['W_FSTUWT']
-                                if st.session_state.correlation_matrix_used_brr:
-                                    pair_columns += replicate_weight_cols
-                                pair_columns.append(var1)
-                                pair_columns.append(var2)
-                                pair_data = df[pair_columns].copy()
-                                total_rows_pv = len(pair_data)
-                                pair_data = pair_data.dropna()
-                                final_size_pv = len(pair_data)
-                                
-                                # Debug insufficient data
-                                if final_size_pv < 2:
-                                    placeholder.write(f"Insufficient non-missing data for correlation between {var1} and {var2}. Before dropping NA: {total_rows_pv} rows, after dropping NA: {final_size_pv} rows.")
-                                    all_corrs.append(np.nan)
-                                    all_p_values.append(np.nan)
-                                    all_se.append(np.nan)
-                                    # Increment work_done for the PV iteration and its BRR iterations
-                                    work_done += work_per_pv
-                                    if st.session_state.correlation_matrix_used_brr:
-                                        work_done += brr_iterations_per_pv * work_per_brr
-                                    completed_pv_iterations += 1
-                                    progress = min(work_done / total_work, 0.7)
-                                    progress_placeholder.progress(progress)
-                                    continue
-                                
-                                x = pair_data[var1].values
-                                y = pair_data[var2].values
-                                w = pair_data['W_FSTUWT'].values
-                                
-                                # Recompute variable types after subsetting to ensure correct classification
-                                correlation_type = base_correlation_type
-                                corr, p_value = None, None
-                                if correlation_type == "point_biserial":
-                                    # Determine which variable is categorical based on cat_var_index
-                                    cat_var = x if cat_var_index == 0 else y
-                                    cont_var = y if cat_var_index == 0 else x
-                                    cat_var_name = var1 if cat_var_index == 0 else var2
-                                    cont_var_name = var2 if cat_var_index == 0 else var1
-                                    cat_is_cat, cat_is_binary, cat_unique_count = is_categorical(cat_var)
-                                    if cat_is_binary:
-                                        # Safety check: Ensure arguments are correct
-                                        cont_unique_count = pd.Series(cont_var).dropna().nunique()
-                                        cat_unique_count_check = pd.Series(cat_var).dropna().nunique()
-                                        if cat_unique_count_check != 2:
-                                            raise ValueError(f"Safety check failed: Expected categorical variable {cat_var_name} to be binary, but found {cat_unique_count_check} unique values.")
-                                        if cont_unique_count <= 50:  # Assuming continuous variables have more unique values
-                                            raise ValueError(f"Safety check failed: Expected continuous variable {cont_var_name} to have many unique values, but found {cont_unique_count} unique values.")
-                                        corr, p_value = weighted_point_biserial_correlation(cont_var, cat_var, w)
-                                    else:
-                                        placeholder.write(f"Using Pearson's correlation as an approximation for {var1} and {var2}: categorical variable {cat_var_name} has {cat_unique_count} unique values after subsetting (expected 2 for point-biserial).")
-                                        correlation_type = "pearson_approx"
-                                        corr, p_value = weighted_pearson_correlation(x, y, w)
-                                else:
-                                    if correlation_type == "pearson" or correlation_type == "pearson_approx":
-                                        corr, p_value = weighted_pearson_correlation(x, y, w)
-                                    elif correlation_type == "cramers_v":
-                                        corr, p_value = weighted_cramers_v(x, y, w)
-                                
-                                if st.session_state.correlation_matrix_used_brr:
-                                    placeholder.write("Calculating standard error using replicate weights...")
-                                    # Pass work_done as a list to allow modification in the function
-                                    work_done_ref = [work_done]
-                                    # For point-biserial, pass cont_var and cat_var in the correct order
-                                    if correlation_type == "point_biserial":
-                                        se = compute_brr_se_correlation(cont_var, cat_var, w, replicate_weight_cols, pair_data, total_work, work_done_ref, work_per_brr, placeholder, progress_placeholder, correlation_type, cat_var_index)
-                                    else:
-                                        se = compute_brr_se_correlation(x, y, w, replicate_weight_cols, pair_data, total_work, work_done_ref, work_per_brr, placeholder, progress_placeholder, correlation_type, cat_var_index)
-                                    work_done = work_done_ref[0]
-                                    p_value = compute_brr_p_value(corr, se, len(pair_data))
-                                else:
-                                    se = np.nan  # Not used in simple method
-                                    work_done += work_per_pv
-                                    completed_pv_iterations += 1
-                                    progress = min(work_done / total_work, 0.7)
-                                    progress_placeholder.progress(progress)
-                                
-                                all_corrs.append(corr)
-                                all_p_values.append(p_value)
-                                all_se.append(se)
-                                
-                                if not st.session_state.correlation_matrix_used_brr:
-                                    completed_pv_iterations += 1
-                                    progress = min(work_done / total_work, 0.7)
-                                    progress_placeholder.progress(progress)
+                is_cat, is_bin, unique_count = False, False, 0
+            variable_types[domain] = (is_cat, is_bin, unique_count)
+        else:
+            var_code = label_to_var[label]
+            selected_vars.append(var_code)
+            selected_labels.append(label)
+            selected_codes.append(var_code)
+            all_vars.append([var_code])
+            # Determine if the variable is categorical
+            is_cat, is_bin, unique_count = is_categorical(df[var_code])
+            variable_types[var_code] = (is_cat, is_bin, unique_count)
+    
+    run_analysis = st.button("Run Analysis", key="run_correlation_matrix")
+    
+    if run_analysis and (selected_vars or selected_domains) and len(selected_var_labels) >= 2:
+        try:
+            if 'W_FSTUWT' not in df.columns:
+                st.error("Final student weight (W_FSTUWT) not found in the dataset.")
+            else:
+                # Check for replicate weights availability
+                replicate_weight_cols = [f"W_FSTURWT{i}" for i in range(1, 81)]
+                missing_weights = [col for col in replicate_weight_cols if col not in df.columns]
+                st.session_state.correlation_matrix_used_brr = len(missing_weights) == 0  # Use BRR if no replicate weights are missing
+                
+                # Initialize correlation and p-value matrices
+                n_vars = len(selected_var_labels)
+                corr_matrix = np.ones((n_vars, n_vars))
+                p_matrix = np.zeros((n_vars, n_vars))
+                corr_types = {}  # Store correlation type for each pair
+                type_to_letter = {}  # Map correlation types to superscript letters
+                letter_counter = 0  # To assign letters a, b, c, etc.
+                letters = 'abcdefghijklmnopqrstuvwxyz'
+                valid_cases_list = []  # Store valid cases for each pair
+                
+                # Compute the maximum number of plausible values
+                max_pvs = max([len(vars) for vars in all_vars])
+                
+                # Calculate total work for the progress bar
+                num_pairs = (n_vars * (n_vars - 1)) // 2
+                pv_iterations = num_pairs * max_pvs  # Total PV iterations
+                brr_iterations_per_pv = len(replicate_weight_cols) if st.session_state.correlation_matrix_used_brr else 0
+                total_brr_iterations = pv_iterations * brr_iterations_per_pv
+                total_work = pv_iterations + total_brr_iterations
+                work_done = 0
+                work_per_pv = 1  # Each PV iteration is 1 unit of work
+                work_per_brr = 1 / len(replicate_weight_cols) if st.session_state.correlation_matrix_used_brr else 0  # Each BRR iteration is a fraction of a PV unit
+                
+                # Single main progress bar placeholder
+                progress_placeholder = st.empty()
+                progress_placeholder.progress(0.0)
+                
+                # Single placeholder for messages
+                placeholder = st.empty()
+                
+                # Compute correlations for each pair of variables
+                completed_pv_iterations = 0
+                for i in range(n_vars):
+                    for j in range(i + 1, n_vars):
+                        var1_list = all_vars[i]
+                        var2_list = all_vars[j]
+                        var1_is_pv = len(var1_list) > 1
+                        var2_is_pv = len(var2_list) > 1
+                        num_pvs = max(len(var1_list), len(var2_list))
                         
-                            # Combine results
-                            if num_pvs == 1:
-                                placeholder.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]} (single iteration, no plausible values)...")
-                                combined_corr = all_corrs[0]
-                                combined_p_value = all_p_values[0]
-                                combined_se = all_se[0]
+                        all_corrs = []
+                        all_p_values = []  # Store p-values directly
+                        all_se = []
+                        pair_valid_cases = []  # Store valid cases for this pair
+                        base_correlation_type = None  # Store the intended correlation type before PV loop
+                        cat_var_index = None  # Store which variable is categorical (0 for var1, 1 for var2)
+                        
+                        # Determine variable types
+                        var1_code = selected_codes[i]
+                        var2_code = selected_codes[j]
+                        var1_is_cat, var1_is_binary, var1_unique_count = variable_types[var1_code]
+                        var2_is_cat, var2_is_binary, var2_unique_count = variable_types[var2_code]
+                        
+                        # Determine base correlation type (before PV loop)
+                        if not var1_is_cat and not var2_is_cat:
+                            base_correlation_type = "pearson"
+                            cat_var_index = None  # No categorical variable
+                        elif var1_is_cat and var2_is_cat:
+                            base_correlation_type = "cramers_v"
+                            cat_var_index = 0  # Both are categorical, default to var1 for consistency
+                        elif not var1_is_cat and var2_is_cat:
+                            if var2_is_binary:
+                                base_correlation_type = "point_biserial"
+                                cat_var_index = 1  # var2 is categorical
                             else:
-                                placeholder.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]}...")
-                                combined_corr, combined_se, combined_p_value = apply_rubins_rules_correlations(all_corrs, all_se, len(pair_data))
-                            
-                            # Store in matrices
-                            corr_matrix[i, j] = combined_corr
-                            corr_matrix[j, i] = combined_corr
-                            p_matrix[i, j] = combined_p_value
-                            p_matrix[j, i] = combined_p_value
-                    
-                    # Update progress bar after correlation computation
-                    progress_placeholder.progress(0.9)  # 90% after rendering the table
-                    
-                    # Store results in session state
-                    st.session_state.correlation_matrix_results = {
-                        'labels': selected_labels,
-                        'codes': selected_codes,
-                        'corr_matrix': corr_matrix,
-                        'p_matrix': p_matrix,
-                        'corr_types': corr_types,
-                        'type_to_letter': type_to_letter
-                    }
-                    st.session_state.correlation_matrix_completed = True
-                    
-                    # Render the correlation matrix
-                    placeholder.write("Rendering correlation matrix...")
-                    matrix_height = len(selected_labels) * 90 + 30
-                    table_html = render_correlation_matrix(selected_labels, corr_matrix, p_matrix, corr_types, type_to_letter)
-                    components.html(table_html, height=matrix_height, scrolling=True)
-                    placeholder.write("Correlation matrix analysis completed.")
-                    
-                    # Generate scatter plots for all pairs in a 2-column grid
-                    st.header("Scatter plots for all variable pairs:")
-                    variable_pairs = list(itertools.combinations(range(n_vars), 2))
-                    placeholder.write(f"Generating scatter plots for {len(variable_pairs)} pairs of variables.")
-                    
-                    for idx in range(0, len(variable_pairs), 2):
-                        # Create a row with 2 columns
-                        cols = st.columns(2)
+                                base_correlation_type = "pearson_approx"
+                                cat_var_index = 1
+                                placeholder.write(f"Using Pearson's correlation as an approximation for {selected_labels[i]} (continuous) vs. {selected_labels[j]} (non-binary categorical).")
+                        elif var1_is_cat and not var2_is_cat:
+                            if var1_is_binary:
+                                base_correlation_type = "point_biserial"
+                                cat_var_index = 0  # var1 is categorical
+                            else:
+                                base_correlation_type = "pearson_approx"
+                                cat_var_index = 0
+                                placeholder.write(f"Using Pearson's correlation as an approximation for {selected_labels[i]} (non-binary categorical) vs. {selected_labels[j]} (continuous).")
                         
-                        # First plot in the row
-                        i, j = variable_pairs[idx]
+                        # Assign a superscript letter to this correlation type if not already assigned
+                        if base_correlation_type not in type_to_letter:
+                            if letter_counter < len(letters):
+                                type_to_letter[base_correlation_type] = letters[letter_counter]
+                                letter_counter += 1
+                        
+                        # Store correlation type for this pair
+                        corr_types[(i, j)] = base_correlation_type
+                        corr_types[(j, i)] = base_correlation_type
+                        
+                        for pv_idx in range(num_pvs):
+                            var1 = var1_list[pv_idx % len(var1_list)]
+                            var2 = var2_list[pv_idx % len(var2_list)]
+                            placeholder.write(f"Processing correlation between {var1} and {var2}...")
+                            
+                            # Create a subset DataFrame for just this pair to ensure consistent NA handling
+                            pair_columns = ['W_FSTUWT']
+                            if st.session_state.correlation_matrix_used_brr:
+                                pair_columns += replicate_weight_cols
+                            pair_columns.append(var1)
+                            pair_columns.append(var2)
+                            pair_data = df[pair_columns].copy()
+                            total_rows_pv = len(pair_data)
+                            pair_data = pair_data.dropna()
+                            final_size_pv = len(pair_data)
+                            pair_valid_cases.append(final_size_pv)
+                            
+                            # Debug insufficient data
+                            if final_size_pv < 2:
+                                placeholder.write(f"Insufficient non-missing data for correlation between {var1} and {var2}. Before dropping NA: {total_rows_pv} rows, after dropping NA: {final_size_pv} rows.")
+                                all_corrs.append(np.nan)
+                                all_p_values.append(np.nan)
+                                all_se.append(np.nan)
+                                # Increment work_done for the PV iteration and its BRR iterations
+                                work_done += work_per_pv
+                                if st.session_state.correlation_matrix_used_brr:
+                                    work_done += brr_iterations_per_pv * work_per_brr
+                                completed_pv_iterations += 1
+                                progress = min(work_done / total_work, 0.7)
+                                progress_placeholder.progress(progress)
+                                continue
+                            
+                            x = pair_data[var1].values
+                            y = pair_data[var2].values
+                            w = pair_data['W_FSTUWT'].values
+                            
+                            # Recompute variable types after subsetting to ensure correct classification
+                            correlation_type = base_correlation_type
+                            corr, p_value = None, None
+                            if correlation_type == "point_biserial":
+                                # Determine which variable is categorical based on cat_var_index
+                                cat_var = x if cat_var_index == 0 else y
+                                cont_var = y if cat_var_index == 0 else x
+                                cat_var_name = var1 if cat_var_index == 0 else var2
+                                cont_var_name = var2 if cat_var_index == 0 else var1
+                                cat_is_cat, cat_is_binary, cat_unique_count = is_categorical(cat_var)
+                                if cat_is_binary:
+                                    # Safety check: Ensure arguments are correct
+                                    cont_unique_count = pd.Series(cont_var).dropna().nunique()
+                                    cat_unique_count_check = pd.Series(cat_var).dropna().nunique()
+                                    if cat_unique_count_check != 2:
+                                        raise ValueError(f"Safety check failed: Expected categorical variable {cat_var_name} to be binary, but found {cat_unique_count_check} unique values.")
+                                    if cont_unique_count <= 50:  # Assuming continuous variables have more unique values
+                                        raise ValueError(f"Safety check failed: Expected continuous variable {cont_var_name} to have many unique values, but found {cont_unique_count} unique values.")
+                                    corr, p_value = weighted_point_biserial_correlation(cont_var, cat_var, w)
+                                else:
+                                    placeholder.write(f"Using Pearson's correlation as an approximation for {var1} and {var2}: categorical variable {cat_var_name} has {cat_unique_count} unique values after subsetting (expected 2 for point-biserial).")
+                                    correlation_type = "pearson_approx"
+                                    corr, p_value = weighted_pearson_correlation(x, y, w)
+                            else:
+                                if correlation_type == "pearson" or correlation_type == "pearson_approx":
+                                    corr, p_value = weighted_pearson_correlation(x, y, w)
+                                elif correlation_type == "cramers_v":
+                                    corr, p_value = weighted_cramers_v(x, y, w)
+                            
+                            if st.session_state.correlation_matrix_used_brr:
+                                placeholder.write("Calculating standard error using replicate weights...")
+                                # Pass work_done as a list to allow modification in the function
+                                work_done_ref = [work_done]
+                                # For point-biserial, pass cont_var and cat_var in the correct order
+                                if correlation_type == "point_biserial":
+                                    se = compute_brr_se_correlation(cont_var, cat_var, w, replicate_weight_cols, pair_data, total_work, work_done_ref, work_per_brr, placeholder, progress_placeholder, correlation_type, cat_var_index)
+                                else:
+                                    se = compute_brr_se_correlation(x, y, w, replicate_weight_cols, pair_data, total_work, work_done_ref, work_per_brr, placeholder, progress_placeholder, correlation_type, cat_var_index)
+                                work_done = work_done_ref[0]
+                                p_value = compute_brr_p_value(corr, se, len(pair_data))
+                            else:
+                                se = np.nan  # Not used in simple method
+                                work_done += work_per_pv
+                                completed_pv_iterations += 1
+                                progress = min(work_done / total_work, 0.7)
+                                progress_placeholder.progress(progress)
+                            
+                            all_corrs.append(corr)
+                            all_p_values.append(p_value)
+                            all_se.append(se)
+                            
+                            if not st.session_state.correlation_matrix_used_brr:
+                                completed_pv_iterations += 1
+                                progress = min(work_done / total_work, 0.7)
+                                progress_placeholder.progress(progress)
+                        
+                        # Combine results
+                        if num_pvs == 1:
+                            placeholder.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]} (single iteration, no plausible values)...")
+                            combined_corr = all_corrs[0]
+                            combined_p_value = all_p_values[0]
+                            combined_se = all_se[0]
+                        else:
+                            placeholder.write(f"Combining results for {selected_labels[i]} and {selected_labels[j]}...")
+                            combined_corr, combined_se, combined_p_value = apply_rubins_rules_correlations(all_corrs, all_se, len(pair_data))
+                        
+                        # Store in matrices
+                        corr_matrix[i, j] = combined_corr
+                        corr_matrix[j, i] = combined_corr
+                        p_matrix[i, j] = combined_p_value
+                        p_matrix[j, i] = combined_p_value
+                        valid_cases_list.append(min(pair_valid_cases))  # Use minimum valid cases for this pair
+                
+                # Update progress bar after correlation computation
+                progress_placeholder.progress(0.9)  # 90% after rendering the table
+                
+                # Calculate minimum valid cases across all pairs
+                valid_cases = min(valid_cases_list) if valid_cases_list else None
+                original_sample_size = df.shape[0]
+                
+                # Store results in session state
+                st.session_state.correlation_matrix_results = {
+                    'labels': selected_labels,
+                    'codes': selected_codes,
+                    'corr_matrix': corr_matrix,
+                    'p_matrix': p_matrix,
+                    'corr_types': corr_types,
+                    'type_to_letter': type_to_letter,
+                    'valid_cases': valid_cases,
+                    'original_sample_size': original_sample_size
+                }
+                st.session_state.correlation_matrix_completed = True
+                
+                # Render the correlation matrix
+                placeholder.write("Rendering correlation matrix...")
+                matrix_height = len(selected_labels) * 90 + 20  # Increased height per row and base offset
+                table_html = render_correlation_matrix(selected_labels, corr_matrix, p_matrix, corr_types, type_to_letter, valid_cases, original_sample_size)
+                components.html(table_html, height=matrix_height, scrolling=True)
+                placeholder.write("Correlation matrix analysis completed.")
+                
+                # Generate scatter plots for all pairs in a 2-column grid
+                st.header("Scatter plots for all variable pairs:")
+                variable_pairs = list(itertools.combinations(range(n_vars), 2))
+                placeholder.write(f"Generating scatter plots for {len(variable_pairs)} pairs of variables.")
+                
+                for idx in range(0, len(variable_pairs), 2):
+                    # Create a row with 2 columns
+                    cols = st.columns(2)
+                    
+                    # First plot in the row
+                    i, j = variable_pairs[idx]
+                    var1_label = selected_labels[i]
+                    var2_label = selected_labels[j]
+                    var1_code = selected_codes[i]
+                    var2_code = selected_codes[j]
+                    corr = corr_matrix[i, j]
+                    corr_type = corr_types.get((i, j), "unknown")
+                    corr_type_display = {
+                        "pearson": "Pearson",
+                        "point_biserial": "Point-Biserial",
+                        "cramers_v": "Cramér's V",
+                        "pearson_approx": "Pearson (approx)"
+                    }.get(corr_type, "Unknown")
+                    
+                    # Handle plausible value domains
+                    if var1_code in pv_domains:
+                        var1_data = df[pv_domains[var1_code][0]]
+                    else:
+                        var1_data = df[var1_code]
+                    
+                    if var2_code in pv_domains:
+                        var2_data = df[pv_domains[var2_code][0]]
+                    else:
+                        var2_data = df[var2_code]
+                    
+                    # Create plot dataframe step-by-step
+                    data_dict = {
+                        var1_code: var1_data,
+                        var2_code: var2_data,
+                        'weights': df['W_FSTUWT']
+                    }
+                    plot_df = pd.DataFrame(data_dict)
+                    plot_df = plot_df.dropna()
+                    
+                    # Create scatter plot
+                    fig1 = create_weighted_scatter(plot_df, var1_code, var2_code, 
+                                                  plot_df['weights'], var1_label, var2_label, corr, corr_type_display)
+                    with cols[0]:
+                        st.pyplot(fig1)
+                    
+                    # Second plot in the row (if available)
+                    if idx + 1 < len(variable_pairs):
+                        i, j = variable_pairs[idx + 1]
                         var1_label = selected_labels[i]
                         var2_label = selected_labels[j]
                         var1_code = selected_codes[i]
@@ -916,84 +973,44 @@ else:
                         plot_df = plot_df.dropna()
                         
                         # Create scatter plot
-                        fig1 = create_weighted_scatter(plot_df, var1_code, var2_code, 
+                        fig2 = create_weighted_scatter(plot_df, var1_code, var2_code, 
                                                       plot_df['weights'], var1_label, var2_label, corr, corr_type_display)
-                        with cols[0]:
-                            st.pyplot(fig1)
-                        
-                        # Second plot in the row (if available)
-                        if idx + 1 < len(variable_pairs):
-                            i, j = variable_pairs[idx + 1]
-                            var1_label = selected_labels[i]
-                            var2_label = selected_labels[j]
-                            var1_code = selected_codes[i]
-                            var2_code = selected_codes[j]
-                            corr = corr_matrix[i, j]
-                            corr_type = corr_types.get((i, j), "unknown")
-                            corr_type_display = {
-                                "pearson": "Pearson",
-                                "point_biserial": "Point-Biserial",
-                                "cramers_v": "Cramér's V",
-                                "pearson_approx": "Pearson (approx)"
-                            }.get(corr_type, "Unknown")
-                            
-                            # Handle plausible value domains
-                            if var1_code in pv_domains:
-                                var1_data = df[pv_domains[var1_code][0]]
-                            else:
-                                var1_data = df[var1_code]
-                            
-                            if var2_code in pv_domains:
-                                var2_data = df[pv_domains[var2_code][0]]
-                            else:
-                                var2_data = df[var2_code]
-                            
-                            # Create plot dataframe step-by-step
-                            data_dict = {
-                                var1_code: var1_data,
-                                var2_code: var2_data,
-                                'weights': df['W_FSTUWT']
-                            }
-                            plot_df = pd.DataFrame(data_dict)
-                            plot_df = plot_df.dropna()
-                            
-                            # Create scatter plot
-                            fig2 = create_weighted_scatter(plot_df, var1_code, var2_code, 
-                                                          plot_df['weights'], var1_label, var2_label, corr, corr_type_display)
-                            with cols[1]:
-                                st.pyplot(fig2)
-                    
-                    # Update progress bar to 100% after scatter plots
-                    progress_placeholder.progress(1.0)
-                    placeholder.empty()  # Clear the placeholder after completion
-            except Exception as e:
-                placeholder.empty()
-                st.error(f"Error computing correlation matrix: {str(e)}")
-                st.session_state.correlation_matrix_completed = False
-                st.session_state.correlation_matrix_results = None
-        elif st.session_state.correlation_matrix_results and st.session_state.correlation_matrix_completed:
-            if selected_var_labels:
-                results = st.session_state.correlation_matrix_results
-                matrix_height = len(results['labels']) * 90 + 30
-                table_html = render_correlation_matrix(
-                    results['labels'],
-                    results['corr_matrix'],
-                    results['p_matrix'],
-                    results['corr_types'],
-                    results['type_to_letter']
-                )
-                components.html(table_html, height=matrix_height, scrolling=True)
-                st.write("Correlation matrix analysis completed.")
-            else:
-                st.write("Please select at least two variables to compute the correlation matrix.")
+                        with cols[1]:
+                            st.pyplot(fig2)
+                
+                # Update progress bar to 100% after scatter plots
+                progress_placeholder.progress(1.0)
+                placeholder.empty()  # Clear the placeholder after completion
+        except Exception as e:
+            placeholder.empty()
+            st.error(f"Error computing correlation matrix: {str(e)}")
+            st.session_state.correlation_matrix_completed = False
+            st.session_state.correlation_matrix_results = None
+    elif st.session_state.correlation_matrix_results and st.session_state.correlation_matrix_completed:
+        if selected_var_labels:
+            results = st.session_state.correlation_matrix_results
+            matrix_height = len(results['labels']) * 90 + 20  # Increased height per row and base offset
+            table_html = render_correlation_matrix(
+                results['labels'],
+                results['corr_matrix'],
+                results['p_matrix'],
+                results['corr_types'],
+                results['type_to_letter'],
+                results['valid_cases'],
+                results['original_sample_size']
+            )
+            components.html(table_html, height=matrix_height, scrolling=True)
+            st.write("Correlation matrix analysis completed.")
         else:
-            st.write("Please select at least two variables and click 'Run Analysis' to compute the correlation matrix.")
+            st.write("Please select at least two variables to compute the correlation matrix.")
+    else:
+        st.write("Please select at least two variables and click 'Run Analysis' to compute the correlation matrix.")
 
 # Instructions section
 st.header("Instructions")
 st.markdown("""
 - **Select Variables**: Choose two or more variables (domains or numeric variables) from the dropdown menus. Plausible value domains (e.g., Mathematics score, Reading score) will use all 10 plausible values for analysis.
 - **Run Analysis**: Click "Run Analysis" to perform the weighted correlation matrix analysis. Analyses involving plausible values will be combined using Rubin's rules.
-- **View Results**: Results are displayed in an APA-style table with correlations rounded to 2 decimal places. Superscript letters indicate the correlation type for each pair, explained in the note below the table.
+- **View Results**: Results are displayed in an APA-style table with correlations rounded to 2 decimal places. Superscript letters indicate the correlation type for each pair, explained in the note below the table. The note also includes the number of cases analyzed after listwise deletion and the percentage relative to the original sample size.
 - **Navigate**: Use the sidebar to switch between different analysis types or return to the main page to upload a new dataset.
 """)
