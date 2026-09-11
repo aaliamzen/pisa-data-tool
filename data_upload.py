@@ -359,6 +359,11 @@ else:
     
     # PISA 2025 ST410 split items (…DA_A / …DA_B)
     st410_pattern = re.compile(r'^ST410Q0[1-9]DA_[AB]$', re.IGNORECASE)
+    # School questionnaire items (merged SCH file). Keeps scales like SCHLTYPE, STRATIO, EDUSHORT.
+    sc_item_pattern = re.compile(
+        r'^SC\d{3}(Q|D|FL)',
+        re.IGNORECASE
+    )
     
     display_columns = [
         col for col in df.columns 
@@ -374,6 +379,7 @@ else:
         and not ec_pattern_6.match(col)  # Exclude EC012Q13HA
         and not df[col].isna().all()
         and not st410_pattern.match(col)
+        and not sc_item_pattern.match(col)
     ]
     st.session_state.visible_columns = display_columns  # Store visible columns for downstream scripts
     if not display_columns:
@@ -397,6 +403,7 @@ else:
             or ec_pattern_5.match(col)
             or ec_pattern_6.match(col)
             or st410_pattern.match(col)
+            or sc_item_pattern.match(col)
         ]
         if slipped_display_items:
             st.warning(f"Excluded items or non-PV1 plausible values detected in display: {slipped_display_items}")

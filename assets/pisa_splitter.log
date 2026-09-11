@@ -1,0 +1,8 @@
+2026-09-11 16:22:02 - INFO - Merging student: C:\Users\dcairns\Downloads\Test\UnitedArabEmirates_PISA2025_STU.sav
+2026-09-11 16:22:02 - INFO - with school: C:\Users\dcairns\Downloads\Test\UnitedArabEmirates_PISA2025_SCH.sav
+2026-09-11 16:22:02 - INFO - School rows loaded: 1070
+2026-09-11 16:22:02 - INFO - Student variables: 885; school-only variables added: 448
+2026-09-11 16:22:09 - INFO - Merged 34639 student records; 34639 matched a school; 0 with no school match.
+2026-09-11 16:22:09 - INFO - Output: C:\Users\dcairns\Downloads\Test\UnitedArabEmirates_Merged_PISA2025.sav
+2026-09-11 16:22:09 - INFO - Merge time: 6416 ms
+2026-09-11 16:22:09 - INFO - Merge complete.
