@@ -284,7 +284,7 @@ with col1:
 
 with col2:
     try:
-        with open("assets/PisaSplitter_1.4.exe", "rb") as file:
+        with open("assets/PisaSplitter.exe", "rb") as file:
             st.download_button(
                 label="⬇️ Download PisaSplitter.exe",
                 data=file,
