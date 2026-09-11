@@ -282,6 +282,7 @@ with col1:
     Works with PISA 2015, 2018, 2022 and 2025. Standalone Windows app; no Python or R required.
     """)
 
+
 with col2:
     try:
         with open("assets/PisaSplitter.exe", "rb") as file:
