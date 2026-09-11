@@ -19,7 +19,7 @@ except Exception as e:
     st.error(f"Failed to load logo: {e}")
 
 # Streamlit app configuration
-st.set_page_config(page_title="Linear Regression - PISA Data Exploration Tool", layout="wide")
+st.set_page_config(page_title="Moderation - PISA Data Exploration Tool", layout="wide")
 
 # Function to compute weighted standard deviation
 def weighted_std(x, w):
@@ -137,6 +137,8 @@ def weighted_ols_regression(x, y, w, var_names):
 
 # Function to compute BRR standard errors for regression coefficients
 def compute_brr_se_regression(x, y, replicate_weights, reg_data, progress_bar=None, var_names=None):
+    if var_names is None:
+        var_names = []
     try:
         # Initial regression with final student weights for reference
         main_results, main_r_squared, main_r_squared_adj, main_diagnostics = weighted_ols_regression(x, y, reg_data['W_FSTUWT'].values, var_names)
@@ -316,6 +318,170 @@ def plot_to_base64():
     buf.seek(0)
     return base64.b64encode(buf.read()).decode('utf-8')
 
+
+def _wls_cov(work_df, dep_col, independent_vars, weight_col="W_FSTUWT"):
+    cols = [dep_col] + list(independent_vars) + [weight_col]
+    data = work_df[cols].dropna()
+    if len(data) < len(independent_vars) + 3:
+        return None, None, len(data)
+    y = data[dep_col].astype(float).values
+    X = sm.add_constant(data[independent_vars].astype(float).values)
+    w = data[weight_col].astype(float).values
+    model = sm.WLS(y, X, weights=w).fit()
+    return model.cov_params(), model.df_resid, len(data)
+
+
+def compute_simple_slopes(work_df, dep_col, independent_vars, results, selected_pairs, label_to_var, center_ix):
+    """Pick-a-point simple slopes for each A × B term. SEs use WLS covariance (approx. if DV is a PV)."""
+    outputs = []
+    cov, df_resid, n = _wls_cov(work_df, dep_col, independent_vars)
+    coef_by_code = {}
+    for i, code in enumerate(independent_vars):
+        if i + 1 < len(results):
+            coef_by_code[code] = results[i + 1][1]
+    intercept = results[0][1] if results else np.nan
+
+    for a_lab, b_lab in selected_pairs:
+        a_code = label_to_var.get(a_lab)
+        b_code = label_to_var.get(b_lab)
+        ix_code = f"IX_{a_code}__{b_code}"
+        if a_code not in coef_by_code or b_code not in coef_by_code or ix_code not in coef_by_code:
+            outputs.append({"title": f"{a_lab} × {b_lab}", "error": "Could not match interaction coefficients."})
+            continue
+        b_a = coef_by_code[a_code]
+        b_b = coef_by_code[b_code]
+        b_ab = coef_by_code[ix_code]
+        a_raw = work_df[a_code].astype(float)
+        b_raw = work_df[b_code].astype(float)
+        mean_a, mean_b = a_raw.mean(), b_raw.mean()
+        sd_a, sd_b = a_raw.std(ddof=1), b_raw.std(ddof=1)
+
+        def slope_se(focal_idx, int_idx, z):
+            if cov is None:
+                return np.nan, np.nan
+            v_f = cov[focal_idx, focal_idx]
+            v_i = cov[int_idx, int_idx]
+            c_fi = cov[focal_idx, int_idx]
+            var = v_f + (z ** 2) * v_i + 2 * z * c_fi
+            se = np.sqrt(var) if var > 0 else np.nan
+            return se, df_resid
+
+        def rows_for(focal_lab, foc_code, mod_lab, mod_code, b_foc, mean_m, sd_m, raw_m):
+            idx_f = independent_vars.index(foc_code) + 1
+            idx_i = independent_vars.index(ix_code) + 1
+            nuniq = raw_m.nunique(dropna=True)
+            if nuniq <= 2:
+                levels = []
+                for val in sorted(raw_m.dropna().unique()):
+                    z = val  # product used raw binary values (not centered)
+                    levels.append((f"{mod_lab} = {val:g}", z, b_foc + b_ab * z))
+            else:
+                # Product used (A-meanA)*(B-meanB) when centering is on
+                zs = [(-sd_m if center_ix else mean_m - sd_m),
+                      (0.0 if center_ix else mean_m),
+                      (sd_m if center_ix else mean_m + sd_m)]
+                labels_lvl = [
+                    f"Low {mod_lab} (−1 SD)",
+                    f"Mean {mod_lab}",
+                    f"High {mod_lab} (+1 SD)",
+                ]
+                levels = []
+                for lab, z in zip(labels_lvl, zs):
+                    levels.append((lab, z, b_foc + b_ab * z))
+            table_rows = []
+            for lab, z, slope in levels:
+                se, dfr = slope_se(idx_f, idx_i, z)
+                if se is not None and not np.isnan(se) and se > 0 and dfr and dfr > 0:
+                    t_stat = slope / se
+                    p_val = 2 * (1 - t.cdf(np.abs(t_stat), df=dfr))
+                else:
+                    se, t_stat, p_val = np.nan, np.nan, np.nan
+                table_rows.append((lab, slope, se, p_val))
+            return table_rows
+
+        rows_a_at_b = rows_for(a_lab, a_code, b_lab, b_code, b_a, mean_b, sd_b, b_raw)
+        rows_b_at_a = rows_for(b_lab, b_code, a_lab, a_code, b_b, mean_a, sd_a, a_raw)
+
+        # Predicted lines: Y vs A at low/mean/high B, others at mean
+        fig, ax = plt.subplots(figsize=(6.2, 4.2))
+        a_grid = np.linspace(a_raw.quantile(0.05), a_raw.quantile(0.95), 40)
+        other_means = {}
+        for code in independent_vars:
+            if code not in (a_code, b_code, ix_code):
+                other_means[code] = work_df[code].astype(float).mean()
+        if b_raw.nunique(dropna=True) <= 2:
+            b_levels = [(f"{b_lab} = {v:g}", v) for v in sorted(b_raw.dropna().unique())]
+        else:
+            b_levels = [
+                (f"Low {b_lab} (−1 SD)", mean_b - sd_b),
+                (f"Mean {b_lab}", mean_b),
+                (f"High {b_lab} (+1 SD)", mean_b + sd_b),
+            ]
+        for lvl_lab, b_val in b_levels:
+            if center_ix and b_raw.nunique(dropna=True) > 2:
+                prod = (a_grid - mean_a) * (b_val - mean_b)
+            else:
+                prod = a_grid * b_val
+            yhat = intercept + b_a * a_grid + b_b * b_val + b_ab * prod
+            for code, mu in other_means.items():
+                yhat = yhat + coef_by_code.get(code, 0.0) * mu
+            ax.plot(a_grid, yhat, label=lvl_lab)
+        ax.set_xlabel(a_lab)
+        ax.set_ylabel("Predicted outcome")
+        ax.set_title(f"Simple slopes: {a_lab} at levels of {b_lab}")
+        ax.legend(fontsize=7)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        plot_b64 = plot_to_base64()
+
+        outputs.append({
+            "title": f"{a_lab} × {b_lab}",
+            "focal_a": a_lab,
+            "mod_b": b_lab,
+            "rows_a_at_b": rows_a_at_b,
+            "rows_b_at_a": rows_b_at_a,
+            "plot": plot_b64,
+            "n": n,
+        })
+    return outputs
+
+
+def render_simple_slope_table(title, focal, moderator, rows):
+    html = f"""
+    <div style="font-family: Times New Roman, Times, serif; margin: 12px 0 20px 0;">
+      <div style="font-weight:bold;">Simple slopes of {focal} at levels of {moderator}</div>
+      <div style="font-style:italic; margin-bottom:8px;">{title}</div>
+      <table style="border-collapse:collapse; font-size:14px;">
+        <tr style="border-top:1px solid #000; border-bottom:1px solid #000;">
+          <th style="text-align:left; padding:6px 12px; font-weight:normal;">Level of {moderator}</th>
+          <th style="padding:6px 12px; font-weight:normal;"><i>B</i></th>
+          <th style="padding:6px 12px; font-weight:normal;"><i>SE</i></th>
+          <th style="padding:6px 12px; font-weight:normal;"><i>p</i></th>
+        </tr>
+    """
+    for i, (lab, slope, se, p_val) in enumerate(rows):
+        slope_d = f"{slope:.2f}" if not np.isnan(slope) else "-"
+        se_d = f"{se:.2f}" if not np.isnan(se) else "-"
+        if np.isnan(p_val):
+            p_d, sig = "-", ""
+        elif p_val < 0.001:
+            p_d, sig = "&lt; .001", "**"
+        elif p_val < 0.01:
+            p_d, sig = f"{p_val:.3f}", "*"
+        elif p_val < 0.05:
+            p_d, sig = f"{p_val:.3f}", "*"
+        else:
+            p_d, sig = f"{p_val:.3f}", ""
+        border = "border-bottom:1px solid #000;" if i == len(rows) - 1 else ""
+        html += f"<tr style='{border}'><td style='padding:6px 12px;'>{lab}</td><td style='text-align:center; padding:6px 12px;'>{slope_d}{sig}</td><td style='text-align:center; padding:6px 12px;'>{se_d}</td><td style='text-align:center; padding:6px 12px;'>{p_d}</td></tr>"
+    html += """</table>
+      <div style="font-size:13px; margin-top:6px;"><i>Note.</i> Continuous moderators evaluated at −1 SD, mean, and +1 SD.
+      Standard errors from the weighted OLS covariance matrix (approximate when the outcome is a plausible-value score).
+      *<i>p</i> &lt; .05. **<i>p</i> &lt; .01.</div>
+    </div>
+    """
+    return html
+
 # Function to compute linear regression with PVs and BRR
 def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weights, replicate_weights, use_brr, var_labels, status_placeholder=None):
     try:
@@ -369,7 +535,7 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
             if use_brr:
                 if status_placeholder:
                     status_placeholder.write("Calculating standard errors using replicate weights...")
-                brr_se, brr_se_std = compute_brr_se_regression(X, y, replicate_weights, data, independent_vars)
+                brr_se, brr_se_std = compute_brr_se_regression(X, y, replicate_weights, data, None, independent_vars)
                 # Update results with BRR standard errors and recompute p-values
                 updated_results = []
                 for idx, (var, coef, std_coef, _, _) in enumerate(results):
@@ -664,7 +830,7 @@ def render_regression_table(dependent_var_label, results, r_squared, r_squared_a
     </style>
     <div class="reg-table-container">
         <div class="reg-table-title">Table 1</div>
-        <div class="reg-table-subtitle">Weighted Linear Regression Results for Dependent Variable: {{dependent_var}}</div>
+        <div class="reg-table-subtitle">Weighted Moderation Results for Dependent Variable: {{dependent_var}}</div>
         <table class="reg-table">
             <tr class="reg-table-header">
                 <th>Variable</th>
@@ -738,23 +904,20 @@ variable_labels = st.session_state.get('variable_labels', {})
 value_labels = st.session_state.get('value_labels', {})
 visible_columns = st.session_state.get('visible_columns', [])
 
-# Clear session state to avoid caching issues
-if 'regression_results' in st.session_state:
-    del st.session_state['regression_results']
-if 'regression_completed' in st.session_state:
-    del st.session_state['regression_completed']
-
-# Initialize session state for this page
-if 'regression_results' not in st.session_state:
-    st.session_state.regression_results = None
-if 'regression_completed' not in st.session_state:
-    st.session_state.regression_completed = False
+if "med_completed" not in st.session_state:
+    st.session_state.med_completed = False
 
 # Streamlit UI
-st.title("Linear Regression Analysis (OLS)")
+st.title("Mediation and moderated mediation")
 label = st.session_state.get("dataset_label")
 if label:
     st.info(f"Dataset: {label}")
+st.caption(
+    "Mediation: does M carry part of X → Y? "
+    "Moderated mediation: does that indirect effect change across levels of W? "
+    "Y may be a PISA score domain; X, M and W should be observed variables. "
+    "Single-level weighted OLS, not SEM."
+)
 if df is None or df.empty:
     st.warning("No data available. Please upload a dataset on the main page.")
 else:
@@ -832,92 +995,86 @@ else:
     # Combine domain options and regular numeric variables for the dropdown
     all_var_options = domain_options + unique_var_labels
     
-    if len(all_var_options) < 2:
-        st.warning("At least two numeric variables or domains are required for linear regression analysis.")
+    if len(unique_var_labels) < 2:
+        st.warning("Need at least two observed variables plus an outcome for mediation.")
     else:
-        # Select Dependent Variable (no default selection)
-        st.write("Select the dependent variable:")
+        st.write("Select the outcome (Y):")
         dependent_var_label = st.selectbox(
-            "Dependent Variable",
-            [""] + all_var_options,  # Add empty option as the first choice
-            index=0,  # Default to empty selection
-            key="dep_var"
+            "Outcome (Y)",
+            [""] + all_var_options,
+            index=0,
+            key="med_y",
         )
-        
-        # If no dependent variable is selected, set to None to prevent further processing
         if not dependent_var_label:
             dependent_var = None
+        elif dependent_var_label in label_to_domain:
+            dependent_var = pv_domains[label_to_domain[dependent_var_label]][0]
         else:
-            # Determine if the dependent variable is a domain or a regular variable
-            if dependent_var_label in label_to_domain:
-                dependent_var = pv_domains[label_to_domain[dependent_var_label]][0]  # Use the first PV (e.g., PV1MATH)
-            else:
-                dependent_var = label_to_var[dependent_var_label]
-        
-        # Select Predictors (no "optional" label, blank by default)
-        st.write("Select predictors:")
-        predictor_options = [label for label in all_var_options if label != dependent_var_label]
-        predictor_labels = st.multiselect(
-            "Predictors",
-            predictor_options,
-            default=[],
-            key="predictors"
+            dependent_var = label_to_var[dependent_var_label]
+
+        xm_options = [lab for lab in unique_var_labels if lab != dependent_var_label]
+        st.write("Select the predictor (X):")
+        x_label = st.selectbox("Predictor (X)", [""] + xm_options, key="med_x")
+        st.write("Select the mediator (M) — the variable that may carry the X → Y association:")
+        m_label = st.selectbox(
+            "Mediator (M)",
+            [""] + [lab for lab in xm_options if lab != x_label],
+            key="med_m",
         )
-        
-        # Map predictor labels to actual column names
-        predictors = []
-        for label in predictor_labels:
-            if label in label_to_domain:
-                domain = label_to_domain[label]
-                predictors.append(pv_domains[domain][0])
-            else:
-                predictors.append(label_to_var[label])
-        
-        # Select Covariates (at the bottom, labeled as optional, default to Student gender and ESCS)
-        st.write("Select covariates (optional):")
-        covariate_options = [label for label in all_var_options if label != dependent_var_label and label not in predictor_labels]
-        # Map ST004D01T and ESCS to their labels
+        st.write("Optional moderator (W) — leave blank for ordinary mediation:")
+        w_label = st.selectbox(
+            "Moderator (W)",
+            [""] + [lab for lab in xm_options if lab not in (x_label, m_label)],
+            key="med_w",
+        )
+        which_paths = None
+        if w_label:
+            which_paths = st.radio(
+                "W moderates which path?",
+                ["a only (X → M)", "b only (M → Y)", "both a and b"],
+                index=2,
+                key="med_which_paths",
+                help="a only = X×W in the mediator model. b only = M×W in the outcome model. both = Hayes-style moderated mediation.",
+            )
+            st.checkbox("Center continuous variables before products", value=True, key="med_center")
+        center_ix = st.session_state.get("med_center", True)
+
+        covariate_options = [
+            lab for lab in unique_var_labels
+            if lab not in (dependent_var_label, x_label, m_label, w_label) and lab
+        ]
         default_covariates = []
         student_gender_label = variable_labels.get("ST004D01T", "ST004D01T")
-        # Check if the label for ST004D01T was modified due to duplicates
-        for label in unique_var_labels:
-            if label == student_gender_label or label.startswith(f"{student_gender_label} ("):
-                student_gender_label = label
+        for lab in unique_var_labels:
+            if lab == student_gender_label or lab.startswith(f"{student_gender_label} ("):
+                student_gender_label = lab
                 break
         escs_label = variable_labels.get("ESCS", "ESCS")
-        for label in unique_var_labels:
-            if label == escs_label or label.startswith(f"{escs_label} ("):
-                escs_label = label
+        for lab in unique_var_labels:
+            if lab == escs_label or lab.startswith(f"{escs_label} ("):
+                escs_label = lab
                 break
-        # Set default covariates
-        if student_gender_label in covariate_options:
+        if student_gender_label in covariate_options and student_gender_label not in (x_label, m_label):
             default_covariates.append(student_gender_label)
-        if escs_label in covariate_options:
+        if escs_label in covariate_options and escs_label not in (x_label, m_label):
             default_covariates.append(escs_label)
-        
         covariate_labels = st.multiselect(
             "Covariates (optional)",
             covariate_options,
             default=default_covariates,
-            key="covariates"
+            key="med_covariates",
         )
+        covariates = [label_to_var[lab] for lab in covariate_labels if lab in label_to_var]
+
+        ready = bool(dependent_var and x_label and m_label and x_label in label_to_var and m_label in label_to_var)
+        if ready:
+            st.success(f"X = {x_label}  →  M = {m_label}  →  Y = {dependent_var_label}")
+        else:
+            st.info("Choose Y, X and M to estimate mediation.")
+
+        run_analysis = st.button("Run mediation", key="run_mediation")
         
-        # Map covariate labels to actual column names
-        covariates = []
-        for label in covariate_labels:
-            if label in label_to_domain:
-                # Use the first PV for the domain (e.g., PV1MATH for Mathematics score)
-                domain = label_to_domain[label]
-                covariates.append(pv_domains[domain][0])
-            else:
-                covariates.append(label_to_var[label])
-        
-        # Combine covariates and predictors for the regression
-        independent_vars = covariates + predictors
-        
-        run_analysis = st.button("Run Analysis", key="run_regression")
-        
-        if run_analysis and independent_vars and dependent_var:
+        if run_analysis and ready:
             try:
                 if 'W_FSTUWT' not in df.columns:
                     st.error("Final student weight (W_FSTUWT) not found in the dataset.")
@@ -929,65 +1086,225 @@ else:
                     
                     # Create a placeholder for status messages
                     status_placeholder = st.empty()
-                    
-                    # Compute regression with PVs and BRR, passing label_to_var for mapping and the placeholder
-                    results, r_squared, r_squared_adj, diagnostics, visualizations, final_size, original_size = compute_linear_regression_with_pvs(
-                        df, dependent_var, independent_vars, df['W_FSTUWT'], replicate_weight_cols, use_brr, label_to_var, status_placeholder
+
+                    x_code = label_to_var[x_label]
+                    m_code = label_to_var[m_label]
+                    w_code = label_to_var[w_label] if w_label else None
+                    work_df = df.copy()
+                    work_labels = dict(label_to_var)
+                    mod_a = bool(w_code) and which_paths in ("a only (X → M)", "both a and b")
+                    mod_b = bool(w_code) and which_paths in ("b only (M → Y)", "both a and b")
+                    xw_label = mw_label = None
+                    w_mean = w_sd = np.nan
+                    if w_code:
+                        w_raw = work_df[w_code].astype(float)
+                        w_mean, w_sd = w_raw.mean(), w_raw.std(ddof=1)
+                        x_s = work_df[x_code].astype(float)
+                        m_s = work_df[m_code].astype(float)
+                        w_s = w_raw.copy()
+                        if center_ix:
+                            if x_s.nunique(dropna=True) > 2:
+                                x_s = x_s - x_s.mean()
+                            if m_s.nunique(dropna=True) > 2:
+                                m_s = m_s - m_s.mean()
+                            if w_s.nunique(dropna=True) > 2:
+                                w_s = w_s - w_s.mean()
+                        if mod_a:
+                            xw_code = f"IX_{x_code}__{w_code}"
+                            xw_label = f"{x_label} × {w_label}"
+                            work_df[xw_code] = x_s * w_s
+                            work_labels[xw_label] = xw_code
+                        if mod_b:
+                            mw_code = f"IX_{m_code}__{w_code}"
+                            mw_label = f"{m_label} × {w_label}"
+                            work_df[mw_code] = m_s * w_s
+                            work_labels[mw_label] = mw_code
+
+                    def coef_row(results_list, name):
+                        for row in results_list:
+                            if row[0] == name:
+                                return row
+                        return None
+
+                    status_placeholder.write("Path a: M ~ X + covariates")
+                    a_preds = list(covariates) + [x_code]
+                    if w_code:
+                        a_preds.append(w_code)
+                    if mod_a:
+                        a_preds.append(xw_code)
+                    res_a, r2_a, r2a_a, diag_a, _, n_a, n0_a = compute_linear_regression_with_pvs(
+                        work_df, m_code, a_preds, work_df["W_FSTUWT"], replicate_weight_cols, use_brr, work_labels, status_placeholder
                     )
-                    
-                    # Store results in session state
-                    st.session_state.regression_results = results
-                    st.session_state.regression_completed = True
-                    st.session_state.r_squared = r_squared
-                    st.session_state.r_squared_adj = r_squared_adj
-                    st.session_state.diagnostics = diagnostics
-                    st.session_state.visualizations = visualizations
-                    st.session_state.final_size = final_size
-                    st.session_state.original_size = original_size
-                    
-                    # Render the regression table
-                    status_placeholder.write("Rendering regression table...")
-                    table_html = render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, final_size, original_size)
-                    components.html(table_html, height=400, scrolling=True)
-                    
-                    # Display visualizations without headers
-                    if visualizations.get('qq_plot'):
-                        st.image(f"data:image/png;base64,{visualizations['qq_plot']}")
-                    
-                    if visualizations.get('resid_vs_fitted'):
-                        st.image(f"data:image/png;base64,{visualizations['resid_vs_fitted']}")
-                    
-                    if visualizations.get('resid_histogram'):
-                        st.image(f"data:image/png;base64,{visualizations['resid_histogram']}")
-                    
-                    status_placeholder.write("Linear regression analysis completed.")
-                    status_placeholder.empty()  # Clear the placeholder after completion
+                    row_a = coef_row(res_a, x_label)
+                    row_xw = coef_row(res_a, xw_label) if xw_label else None
+
+                    status_placeholder.write("Path b and c': Y ~ X + M + covariates")
+                    b_preds = list(covariates) + [x_code, m_code]
+                    if w_code:
+                        b_preds.append(w_code)
+                    if mod_b:
+                        b_preds.append(mw_code)
+                    res_b, r2_b, r2a_b, diag_b, viz_b, n_b, n0_b = compute_linear_regression_with_pvs(
+                        work_df, dependent_var, b_preds, work_df["W_FSTUWT"], replicate_weight_cols, use_brr, work_labels, status_placeholder
+                    )
+                    row_b = coef_row(res_b, m_label)
+                    row_cp = coef_row(res_b, x_label)
+                    row_mw = coef_row(res_b, mw_label) if mw_label else None
+
+                    status_placeholder.write("Path c (total): Y ~ X + covariates")
+                    c_preds = list(covariates) + [x_code]
+                    if w_code:
+                        c_preds.append(w_code)
+                    res_c, r2_c, r2a_c, diag_c, _, n_c, n0_c = compute_linear_regression_with_pvs(
+                        work_df, dependent_var, c_preds, work_df["W_FSTUWT"], replicate_weight_cols, use_brr, work_labels, status_placeholder
+                    )
+                    row_c = coef_row(res_c, x_label)
+
+                    a_hat = row_a[1] if row_a else np.nan
+                    se_a = row_a[3] if row_a else np.nan
+                    p_a = row_a[4] if row_a else np.nan
+                    b_hat = row_b[1] if row_b else np.nan
+                    se_b = row_b[3] if row_b else np.nan
+                    p_b = row_b[4] if row_b else np.nan
+                    c_hat = row_c[1] if row_c else np.nan
+                    se_c = row_c[3] if row_c else np.nan
+                    p_c = row_c[4] if row_c else np.nan
+                    cp_hat = row_cp[1] if row_cp else np.nan
+                    se_cp = row_cp[3] if row_cp else np.nan
+                    p_cp = row_cp[4] if row_cp else np.nan
+                    indirect = a_hat * b_hat if not (np.isnan(a_hat) or np.isnan(b_hat)) else np.nan
+                    if not any(np.isnan(v) for v in (a_hat, b_hat, se_a, se_b)):
+                        sobel_se = np.sqrt((a_hat ** 2) * (se_b ** 2) + (b_hat ** 2) * (se_a ** 2))
+                        sobel_z = indirect / sobel_se if sobel_se else np.nan
+                        sobel_p = 2 * (1 - t.cdf(np.abs(sobel_z), df=max(n_b - 3, 1))) if not np.isnan(sobel_z) else np.nan
+                    else:
+                        sobel_se, sobel_z, sobel_p = np.nan, np.nan, np.nan
+                    prop = (indirect / c_hat) if (not np.isnan(indirect) and not np.isnan(c_hat) and c_hat != 0) else np.nan
+
+                    def fmt(v, digits=2):
+                        return "-" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:.{digits}f}"
+
+                    def fmt_p(v):
+                        if v is None or (isinstance(v, float) and np.isnan(v)):
+                            return "-"
+                        return "< .001" if v < 0.001 else f"{v:.3f}"
+
+                    st.session_state.med_completed = True
+                    st.session_state.med_summary = {
+                        "x": x_label, "m": m_label, "y": dependent_var_label,
+                        "a": a_hat, "se_a": se_a, "p_a": p_a,
+                        "b": b_hat, "se_b": se_b, "p_b": p_b,
+                        "c": c_hat, "se_c": se_c, "p_c": p_c,
+                        "cp": cp_hat, "se_cp": se_cp, "p_cp": p_cp,
+                        "ind": indirect, "sobel_se": sobel_se, "sobel_z": sobel_z, "sobel_p": sobel_p,
+                        "prop": prop, "n": n_b, "n0": n0_b,
+                    }
+                    st.session_state.med_res_a = (res_a, r2_a, r2a_a, diag_a, n_a, n0_a)
+                    st.session_state.med_res_b = (res_b, r2_b, r2a_b, diag_b, n_b, n0_b)
+                    st.session_state.med_res_c = (res_c, r2_c, r2a_c, diag_c, n_c, n0_c)
+
+                    st.subheader("Path summary")
+                    st.markdown(
+                        f"""
+| Path | Estimate | SE | *p* |
+|---|---:|---:|---:|
+| a (X → M) | {fmt(a_hat)} | {fmt(se_a)} | {fmt_p(p_a)} |
+| b (M → Y \| X) | {fmt(b_hat)} | {fmt(se_b)} | {fmt_p(p_b)} |
+| c (X → Y total) | {fmt(c_hat)} | {fmt(se_c)} | {fmt_p(p_c)} |
+| c′ (X → Y direct) | {fmt(cp_hat)} | {fmt(se_cp)} | {fmt_p(p_cp)} |
+| a × b (indirect) | {fmt(indirect)} | {fmt(sobel_se)} | {fmt_p(sobel_p)} |
+"""
+                    )
+                    st.caption(
+                        f"Sobel z = {fmt(sobel_z, 2)}. "
+                        f"Indirect / total = {fmt(prop, 3) if not np.isnan(prop) else '—'}. "
+                        f"N (Y model after listwise deletion) = {n_b:,} of {n0_b:,}. "
+                        "Sobel is a large-sample test; treat borderline *p* values cautiously. "
+                        "Not a causal claim."
+                    )
+                    cond_rows = []
+                    if w_code and not np.isnan(w_sd) and w_sd > 0:
+                        a0 = a_hat
+                        b0 = b_hat
+                        axw = row_xw[1] if row_xw else 0.0
+                        se_axw = row_xw[3] if row_xw else np.nan
+                        bmw = row_mw[1] if row_mw else 0.0
+                        se_bmw = row_mw[3] if row_mw else np.nan
+                        if w_raw.nunique(dropna=True) <= 2:
+                            levels = [(f"{w_label} = {v:g}", (v - w_mean) if center_ix else v) for v in sorted(w_raw.dropna().unique())]
+                        else:
+                            levels = [
+                                (f"Low {w_label} (−1 SD)", -w_sd if center_ix else w_mean - w_sd),
+                                (f"Mean {w_label}", 0.0 if center_ix else w_mean),
+                                (f"High {w_label} (+1 SD)", w_sd if center_ix else w_mean + w_sd),
+                            ]
+                        st.subheader("Conditional indirect effect a(W) × b(W)")
+                        st.caption(
+                            f"W moderates {which_paths}. "
+                            "a(W) = a + a_XW×W and/or b(W) = b + b_MW×W. "
+                            "SE uses a Sobel-style delta method at each level (ignores coef covariance)."
+                        )
+                        md = "| Level of W | a(W) | b(W) | Indirect | SE | *p* |\n|---|---:|---:|---:|---:|---:|\n"
+                        for lab, z in levels:
+                            az = a0 + (axw if mod_a else 0.0) * z
+                            bz = b0 + (bmw if mod_b else 0.0) * z
+                            indz = az * bz
+                            se_az = np.sqrt(se_a**2 + (z**2)*(se_axw**2)) if (mod_a and not np.isnan(se_a) and not np.isnan(se_axw)) else se_a
+                            se_bz = np.sqrt(se_b**2 + (z**2)*(se_bmw**2)) if (mod_b and not np.isnan(se_b) and not np.isnan(se_bmw)) else se_b
+                            if not any(np.isnan(v) for v in (az, bz, se_az, se_bz)):
+                                se_i = np.sqrt((az**2)*(se_bz**2) + (bz**2)*(se_az**2))
+                                zval = indz / se_i if se_i else np.nan
+                                pz = 2 * (1 - t.cdf(np.abs(zval), df=max(n_b - 4, 1))) if not np.isnan(zval) else np.nan
+                            else:
+                                se_i, pz = np.nan, np.nan
+                            cond_rows.append((lab, az, bz, indz, se_i, pz))
+                            md += f"| {lab} | {fmt(az)} | {fmt(bz)} | {fmt(indz)} | {fmt(se_i)} | {fmt_p(pz)} |\n"
+                        st.markdown(md)
+                        if row_xw:
+                            st.caption(f"X × W on M (moderator of a): B = {fmt(row_xw[1])}, SE = {fmt(row_xw[3])}, p = {fmt_p(row_xw[4])}")
+                        if row_mw:
+                            st.caption(f"M × W on Y (moderator of b): B = {fmt(row_mw[1])}, SE = {fmt(row_mw[3])}, p = {fmt_p(row_mw[4])}")
+                    st.session_state.med_cond = cond_rows
+                    st.session_state.med_which = which_paths
+                    st.session_state.med_w_name = w_label
+                    st.subheader("M ~ X + covariates (path a)")
+                    components.html(render_regression_table(m_label, res_a, r2_a, r2a_a, diag_a, n_a, n0_a), height=320, scrolling=True)
+                    st.subheader("Y ~ X + M + covariates (paths b and c′)")
+                    components.html(render_regression_table(dependent_var_label, res_b, r2_b, r2a_b, diag_b, n_b, n0_b), height=360, scrolling=True)
+                    st.subheader("Y ~ X + covariates (path c, total)")
+                    components.html(render_regression_table(dependent_var_label, res_c, r2_c, r2a_c, diag_c, n_c, n0_c), height=320, scrolling=True)
+                    status_placeholder.empty()
             except Exception as e:
-                st.error(f"Error computing linear regression: {str(e)}")
-                st.session_state.regression_completed = False
-                st.session_state.regression_results = None
-        elif st.session_state.regression_results and st.session_state.regression_completed:
-            if independent_vars and dependent_var:
-                results = st.session_state.regression_results
-                r_squared = st.session_state.get('r_squared', np.nan)
-                r_squared_adj = st.session_state.get('r_squared_adj', np.nan)
-                diagnostics = st.session_state.get('diagnostics', {})
-                visualizations = st.session_state.get('visualizations', {})
-                final_size = st.session_state.get('final_size', 0)
-                original_size = st.session_state.get('original_size', 0)
-                table_html = render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, final_size, original_size)
-                components.html(table_html, height=400, scrolling=True)
-                
-                # Display visualizations without headers
-                if visualizations.get('qq_plot'):
-                    st.image(f"data:image/png;base64,{visualizations['qq_plot']}")
-                
-                if visualizations.get('resid_vs_fitted'):
-                    st.image(f"data:image/png;base64,{visualizations['resid_vs_fitted']}")
-                
-                if visualizations.get('resid_histogram'):
-                    st.image(f"data:image/png;base64,{visualizations['resid_histogram']}")
-                
-                st.write("Linear regression analysis completed.")
+                st.error(f"Error computing mediation: {str(e)}")
+                st.session_state.med_completed = False
+        elif st.session_state.get("med_completed") and st.session_state.get("med_summary"):
+            s = st.session_state.med_summary
+            def fmt(v, digits=2):
+                return "-" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:.{digits}f}"
+            def fmt_p(v):
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    return "-"
+                return "< .001" if v < 0.001 else f"{v:.3f}"
+            st.subheader("Path summary")
+            st.markdown(
+                f"""
+| Path | Estimate | SE | *p* |
+|---|---:|---:|---:|
+| a (X → M) | {fmt(s['a'])} | {fmt(s['se_a'])} | {fmt_p(s['p_a'])} |
+| b (M → Y \| X) | {fmt(s['b'])} | {fmt(s['se_b'])} | {fmt_p(s['p_b'])} |
+| c (X → Y total) | {fmt(s['c'])} | {fmt(s['se_c'])} | {fmt_p(s['p_c'])} |
+| c′ (X → Y direct) | {fmt(s['cp'])} | {fmt(s['se_cp'])} | {fmt_p(s['p_cp'])} |
+| a × b (indirect) | {fmt(s['ind'])} | {fmt(s['sobel_se'])} | {fmt_p(s['sobel_p'])} |
+"""
+            )
+            res_a, r2_a, r2a_a, diag_a, n_a, n0_a = st.session_state.med_res_a
+            res_b, r2_b, r2a_b, diag_b, n_b, n0_b = st.session_state.med_res_b
+            res_c, r2_c, r2a_c, diag_c, n_c, n0_c = st.session_state.med_res_c
+            st.subheader("M ~ X + covariates (path a)")
+            components.html(render_regression_table(s["m"], res_a, r2_a, r2a_a, diag_a, n_a, n0_a), height=320, scrolling=True)
+            st.subheader("Y ~ X + M + covariates (paths b and c′)")
+            components.html(render_regression_table(s["y"], res_b, r2_b, r2a_b, diag_b, n_b, n0_b), height=360, scrolling=True)
+            st.subheader("Y ~ X + covariates (path c, total)")
+            components.html(render_regression_table(s["y"], res_c, r2_c, r2a_c, diag_c, n_c, n0_c), height=320, scrolling=True)
         else:
-            st.write("Please select a dependent variable and at least one covariate or predictor, then click 'Run Analysis' to perform the regression.")
+            st.write("Choose Y, X and M, then click Run mediation.")

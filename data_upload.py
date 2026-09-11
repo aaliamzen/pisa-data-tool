@@ -28,6 +28,50 @@ if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 if 'visible_columns' not in st.session_state:
     st.session_state.visible_columns = []
+    
+if "dataset_label" not in st.session_state:
+    st.session_state.dataset_label = None
+
+CYC_TO_YEAR = {"05": 2012, "06": 2015, "07": 2018, "08": 2022, "09": 2025}
+
+def infer_dataset_label(df, variable_labels, value_labels, filename=None):
+    country = None
+    year = None
+
+    # Filename from PisaSplitter, e.g. Hungary_PISA2025.sav
+    if filename:
+        m = re.search(r"PISA(20\d{2})", filename, re.I)
+        if m:
+            year = int(m.group(1))
+        name_part = re.sub(r"[_\-]?PISA20\d{2}.*", "", filename, flags=re.I)
+        name_part = re.sub(r"\.sav$", "", name_part, flags=re.I).replace("_", " ").strip()
+        if name_part:
+            country = name_part
+
+    # Country from CNT / CNTRYID in the file
+    if country is None:
+        for col in ("CNT", "CNTRYID"):
+            if col in df.columns and not df[col].isna().all():
+                raw = df[col].dropna().mode().iloc[0]
+                labels = value_labels.get(col, {})
+                country = labels.get(raw, labels.get(int(raw) if pd.notna(raw) and float(raw) == int(raw) else raw, raw))
+                country = str(country)
+                break
+
+    # Year from CYC (06=2015, 07=2018, 08=2022, 09=2025)
+    if year is None and "CYC" in df.columns and not df["CYC"].isna().all():
+        raw = str(df["CYC"].dropna().iloc[0]).strip()
+        key = raw.zfill(2)[-2:]
+        year = CYC_TO_YEAR.get(key) or CYC_TO_YEAR.get(raw)
+
+    bits = []
+    if country:
+        bits.append(str(country))
+    if year:
+        bits.append(f"PISA {year}")
+    n = len(df)
+    bits.append(f"{n:,} students")
+    return " · ".join(bits) if bits else f"{n:,} students loaded"
 
 # Function to safely convert label to string
 def safe_label_to_string(label):
@@ -225,6 +269,9 @@ def dataframe_to_html_with_tooltips(df, variable_labels, value_labels, title="Da
 # Streamlit UI
 st.title("PISA Data Exploration Tool")
 
+if st.session_state.get("dataset_label"):
+    st.success(f"Loaded: {st.session_state.dataset_label}")
+
 # ====================== NEW: Tool Download Section ======================
 st.markdown("### Additional Tools")
 col1, col2 = st.columns([3, 1])
@@ -265,8 +312,11 @@ if df is not None:
     st.session_state.variable_labels = variable_labels
     st.session_state.value_labels = value_labels
     st.session_state.data_loaded = True
+    fname = uploaded_file.name if uploaded_file is not None else None
+    st.session_state.dataset_label = infer_dataset_label(df, variable_labels, value_labels, fname)
 else:
     st.session_state.data_loaded = False
+    st.session_state.dataset_label = None
 
 # Main content
 st.header("Data Summary")

@@ -529,7 +529,9 @@ if 'correlation_matrix_used_brr' not in st.session_state:
 
 # Streamlit UI
 st.title("Correlational Analysis")
-
+label = st.session_state.get("dataset_label")
+if label:
+    st.info(f"Dataset: {label}")
 if df is None or df.empty:
     st.warning("No data available. Please upload a dataset on the main page.")
 else:

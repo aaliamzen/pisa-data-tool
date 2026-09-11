@@ -19,7 +19,7 @@ except Exception as e:
     st.error(f"Failed to load logo: {e}")
 
 # Streamlit app configuration
-st.set_page_config(page_title="Linear Regression - PISA Data Exploration Tool", layout="wide")
+st.set_page_config(page_title="Interaction Regression - PISA Data Exploration Tool", layout="wide")
 
 # Function to compute weighted standard deviation
 def weighted_std(x, w):
@@ -315,6 +315,170 @@ def plot_to_base64():
     plt.close()
     buf.seek(0)
     return base64.b64encode(buf.read()).decode('utf-8')
+
+
+def _wls_cov(work_df, dep_col, independent_vars, weight_col="W_FSTUWT"):
+    cols = [dep_col] + list(independent_vars) + [weight_col]
+    data = work_df[cols].dropna()
+    if len(data) < len(independent_vars) + 3:
+        return None, None, len(data)
+    y = data[dep_col].astype(float).values
+    X = sm.add_constant(data[independent_vars].astype(float).values)
+    w = data[weight_col].astype(float).values
+    model = sm.WLS(y, X, weights=w).fit()
+    return model.cov_params(), model.df_resid, len(data)
+
+
+def compute_simple_slopes(work_df, dep_col, independent_vars, results, selected_pairs, label_to_var, center_ix):
+    """Pick-a-point simple slopes for each A × B term. SEs use WLS covariance (approx. if DV is a PV)."""
+    outputs = []
+    cov, df_resid, n = _wls_cov(work_df, dep_col, independent_vars)
+    coef_by_code = {}
+    for i, code in enumerate(independent_vars):
+        if i + 1 < len(results):
+            coef_by_code[code] = results[i + 1][1]
+    intercept = results[0][1] if results else np.nan
+
+    for a_lab, b_lab in selected_pairs:
+        a_code = label_to_var.get(a_lab)
+        b_code = label_to_var.get(b_lab)
+        ix_code = f"IX_{a_code}__{b_code}"
+        if a_code not in coef_by_code or b_code not in coef_by_code or ix_code not in coef_by_code:
+            outputs.append({"title": f"{a_lab} × {b_lab}", "error": "Could not match interaction coefficients."})
+            continue
+        b_a = coef_by_code[a_code]
+        b_b = coef_by_code[b_code]
+        b_ab = coef_by_code[ix_code]
+        a_raw = work_df[a_code].astype(float)
+        b_raw = work_df[b_code].astype(float)
+        mean_a, mean_b = a_raw.mean(), b_raw.mean()
+        sd_a, sd_b = a_raw.std(ddof=1), b_raw.std(ddof=1)
+
+        def slope_se(focal_idx, int_idx, z):
+            if cov is None:
+                return np.nan, np.nan
+            v_f = cov[focal_idx, focal_idx]
+            v_i = cov[int_idx, int_idx]
+            c_fi = cov[focal_idx, int_idx]
+            var = v_f + (z ** 2) * v_i + 2 * z * c_fi
+            se = np.sqrt(var) if var > 0 else np.nan
+            return se, df_resid
+
+        def rows_for(focal_lab, foc_code, mod_lab, mod_code, b_foc, mean_m, sd_m, raw_m):
+            idx_f = independent_vars.index(foc_code) + 1
+            idx_i = independent_vars.index(ix_code) + 1
+            nuniq = raw_m.nunique(dropna=True)
+            if nuniq <= 2:
+                levels = []
+                for val in sorted(raw_m.dropna().unique()):
+                    z = val  # product used raw binary values (not centered)
+                    levels.append((f"{mod_lab} = {val:g}", z, b_foc + b_ab * z))
+            else:
+                # Product used (A-meanA)*(B-meanB) when centering is on
+                zs = [(-sd_m if center_ix else mean_m - sd_m),
+                      (0.0 if center_ix else mean_m),
+                      (sd_m if center_ix else mean_m + sd_m)]
+                labels_lvl = [
+                    f"Low {mod_lab} (−1 SD)",
+                    f"Mean {mod_lab}",
+                    f"High {mod_lab} (+1 SD)",
+                ]
+                levels = []
+                for lab, z in zip(labels_lvl, zs):
+                    levels.append((lab, z, b_foc + b_ab * z))
+            table_rows = []
+            for lab, z, slope in levels:
+                se, dfr = slope_se(idx_f, idx_i, z)
+                if se is not None and not np.isnan(se) and se > 0 and dfr and dfr > 0:
+                    t_stat = slope / se
+                    p_val = 2 * (1 - t.cdf(np.abs(t_stat), df=dfr))
+                else:
+                    se, t_stat, p_val = np.nan, np.nan, np.nan
+                table_rows.append((lab, slope, se, p_val))
+            return table_rows
+
+        rows_a_at_b = rows_for(a_lab, a_code, b_lab, b_code, b_a, mean_b, sd_b, b_raw)
+        rows_b_at_a = rows_for(b_lab, b_code, a_lab, a_code, b_b, mean_a, sd_a, a_raw)
+
+        # Predicted lines: Y vs A at low/mean/high B, others at mean
+        fig, ax = plt.subplots(figsize=(6.2, 4.2))
+        a_grid = np.linspace(a_raw.quantile(0.05), a_raw.quantile(0.95), 40)
+        other_means = {}
+        for code in independent_vars:
+            if code not in (a_code, b_code, ix_code):
+                other_means[code] = work_df[code].astype(float).mean()
+        if b_raw.nunique(dropna=True) <= 2:
+            b_levels = [(f"{b_lab} = {v:g}", v) for v in sorted(b_raw.dropna().unique())]
+        else:
+            b_levels = [
+                (f"Low {b_lab} (−1 SD)", mean_b - sd_b),
+                (f"Mean {b_lab}", mean_b),
+                (f"High {b_lab} (+1 SD)", mean_b + sd_b),
+            ]
+        for lvl_lab, b_val in b_levels:
+            if center_ix and b_raw.nunique(dropna=True) > 2:
+                prod = (a_grid - mean_a) * (b_val - mean_b)
+            else:
+                prod = a_grid * b_val
+            yhat = intercept + b_a * a_grid + b_b * b_val + b_ab * prod
+            for code, mu in other_means.items():
+                yhat = yhat + coef_by_code.get(code, 0.0) * mu
+            ax.plot(a_grid, yhat, label=lvl_lab)
+        ax.set_xlabel(a_lab)
+        ax.set_ylabel("Predicted outcome")
+        ax.set_title(f"Simple slopes: {a_lab} at levels of {b_lab}")
+        ax.legend(fontsize=7)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        plot_b64 = plot_to_base64()
+
+        outputs.append({
+            "title": f"{a_lab} × {b_lab}",
+            "focal_a": a_lab,
+            "mod_b": b_lab,
+            "rows_a_at_b": rows_a_at_b,
+            "rows_b_at_a": rows_b_at_a,
+            "plot": plot_b64,
+            "n": n,
+        })
+    return outputs
+
+
+def render_simple_slope_table(title, focal, moderator, rows):
+    html = f"""
+    <div style="font-family: Times New Roman, Times, serif; margin: 12px 0 20px 0;">
+      <div style="font-weight:bold;">Simple slopes of {focal} at levels of {moderator}</div>
+      <div style="font-style:italic; margin-bottom:8px;">{title}</div>
+      <table style="border-collapse:collapse; font-size:14px;">
+        <tr style="border-top:1px solid #000; border-bottom:1px solid #000;">
+          <th style="text-align:left; padding:6px 12px; font-weight:normal;">Level of {moderator}</th>
+          <th style="padding:6px 12px; font-weight:normal;"><i>B</i></th>
+          <th style="padding:6px 12px; font-weight:normal;"><i>SE</i></th>
+          <th style="padding:6px 12px; font-weight:normal;"><i>p</i></th>
+        </tr>
+    """
+    for i, (lab, slope, se, p_val) in enumerate(rows):
+        slope_d = f"{slope:.2f}" if not np.isnan(slope) else "-"
+        se_d = f"{se:.2f}" if not np.isnan(se) else "-"
+        if np.isnan(p_val):
+            p_d, sig = "-", ""
+        elif p_val < 0.001:
+            p_d, sig = "&lt; .001", "**"
+        elif p_val < 0.01:
+            p_d, sig = f"{p_val:.3f}", "*"
+        elif p_val < 0.05:
+            p_d, sig = f"{p_val:.3f}", "*"
+        else:
+            p_d, sig = f"{p_val:.3f}", ""
+        border = "border-bottom:1px solid #000;" if i == len(rows) - 1 else ""
+        html += f"<tr style='{border}'><td style='padding:6px 12px;'>{lab}</td><td style='text-align:center; padding:6px 12px;'>{slope_d}{sig}</td><td style='text-align:center; padding:6px 12px;'>{se_d}</td><td style='text-align:center; padding:6px 12px;'>{p_d}</td></tr>"
+    html += """</table>
+      <div style="font-size:13px; margin-top:6px;"><i>Note.</i> Continuous moderators evaluated at −1 SD, mean, and +1 SD.
+      Standard errors from the weighted OLS covariance matrix (approximate when the outcome is a plausible-value score).
+      *<i>p</i> &lt; .05. **<i>p</i> &lt; .01.</div>
+    </div>
+    """
+    return html
 
 # Function to compute linear regression with PVs and BRR
 def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weights, replicate_weights, use_brr, var_labels, status_placeholder=None):
@@ -738,23 +902,23 @@ variable_labels = st.session_state.get('variable_labels', {})
 value_labels = st.session_state.get('value_labels', {})
 visible_columns = st.session_state.get('visible_columns', [])
 
-# Clear session state to avoid caching issues
-if 'regression_results' in st.session_state:
-    del st.session_state['regression_results']
-if 'regression_completed' in st.session_state:
-    del st.session_state['regression_completed']
-
-# Initialize session state for this page
-if 'regression_results' not in st.session_state:
-    st.session_state.regression_results = None
-if 'regression_completed' not in st.session_state:
-    st.session_state.regression_completed = False
+if "ix_pairs" not in st.session_state:
+    st.session_state.ix_pairs = []
+if "ix_regression_results" not in st.session_state:
+    st.session_state.ix_regression_results = None
+if "ix_regression_completed" not in st.session_state:
+    st.session_state.ix_regression_completed = False
 
 # Streamlit UI
-st.title("Linear Regression Analysis (OLS)")
+st.title("Regression with Interactions")
 label = st.session_state.get("dataset_label")
 if label:
     st.info(f"Dataset: {label}")
+st.caption(
+    "Same weighted OLS as the linear regression page, plus product terms "
+    "(e.g. Gender × ESCS). Interaction terms can only be built from non-score "
+    "variables (not plausible-value domains). Continuous variables can be centered before multiplying."
+)
 if df is None or df.empty:
     st.warning("No data available. Please upload a dataset on the main page.")
 else:
@@ -914,8 +1078,41 @@ else:
         
         # Combine covariates and predictors for the regression
         independent_vars = covariates + predictors
+
+        st.write("Interaction terms:")
+        st.caption(
+            "Choose pairs from variables already in Predictors or Covariates "
+            "(not Mathematics/Reading/Science scores). Each selected pair is multiplied and added to the model."
+        )
+        center_ix = st.checkbox(
+            "Center continuous variables before multiplying",
+            value=True,
+            key="ix_center",
+            help="Subtract the mean of each continuous variable, then form A×B. Recommended for interpreting main effects.",
+        )
+        ix_choices = [lab for lab in (predictor_labels + covariate_labels) if lab not in label_to_domain]
+        pair_options = []
+        pair_map = {}
+        for i, a_lab in enumerate(ix_choices):
+            for b_lab in ix_choices[i + 1:]:
+                opt = f"{a_lab} × {b_lab}"
+                pair_options.append(opt)
+                pair_map[opt] = (a_lab, b_lab)
+        if len(ix_choices) < 2:
+            st.warning("Select at least two non-score predictors or covariates before you can add an interaction.")
+            selected_ix = []
+        else:
+            selected_ix = st.multiselect(
+                "Interactions to include",
+                pair_options,
+                key="ix_selected_pairs",
+                help="Example: ESCS × Disciplinary climate.",
+            )
+        selected_pairs = [pair_map[opt] for opt in selected_ix if opt in pair_map]
+        if selected_pairs:
+            st.success("Will add: " + "; ".join(selected_ix))
         
-        run_analysis = st.button("Run Analysis", key="run_regression")
+        run_analysis = st.button("Run Analysis", key="run_interaction_regression")
         
         if run_analysis and independent_vars and dependent_var:
             try:
@@ -929,26 +1126,83 @@ else:
                     
                     # Create a placeholder for status messages
                     status_placeholder = st.empty()
+
+                    work_df = df.copy()
+                    work_label_to_var = dict(label_to_var)
+                    work_independent = list(independent_vars)
+                    if not selected_pairs:
+                        st.warning("No interaction selected — running main effects only. Use the Interactions list above.")
+                    for a_lab, b_lab in selected_pairs:
+                        if a_lab not in work_label_to_var or b_lab not in work_label_to_var:
+                            st.error(f"Cannot build interaction {a_lab} × {b_lab}. Include both as predictor or covariate.")
+                            st.stop()
+                        a_code = work_label_to_var[a_lab]
+                        b_code = work_label_to_var[b_lab]
+                        if a_code not in work_independent:
+                            work_independent.append(a_code)
+                        if b_code not in work_independent:
+                            work_independent.append(b_code)
+                        a_s = work_df[a_code].astype(float)
+                        b_s = work_df[b_code].astype(float)
+                        if center_ix:
+                            if a_s.nunique(dropna=True) > 2:
+                                a_s = a_s - a_s.mean()
+                            if b_s.nunique(dropna=True) > 2:
+                                b_s = b_s - b_s.mean()
+                        ix_code = f"IX_{a_code}__{b_code}"
+                        ix_label = f"{a_lab} × {b_lab}"
+                        work_df[ix_code] = a_s * b_s
+                        work_label_to_var[ix_label] = ix_code
+                        if ix_code not in work_independent:
+                            work_independent.append(ix_code)
+                    status_placeholder.write(
+                        "Model terms: " + ", ".join(work_independent)
+                    )
                     
                     # Compute regression with PVs and BRR, passing label_to_var for mapping and the placeholder
                     results, r_squared, r_squared_adj, diagnostics, visualizations, final_size, original_size = compute_linear_regression_with_pvs(
-                        df, dependent_var, independent_vars, df['W_FSTUWT'], replicate_weight_cols, use_brr, label_to_var, status_placeholder
+                        work_df, dependent_var, work_independent, work_df['W_FSTUWT'], replicate_weight_cols, use_brr, work_label_to_var, status_placeholder
                     )
                     
                     # Store results in session state
-                    st.session_state.regression_results = results
-                    st.session_state.regression_completed = True
-                    st.session_state.r_squared = r_squared
-                    st.session_state.r_squared_adj = r_squared_adj
-                    st.session_state.diagnostics = diagnostics
-                    st.session_state.visualizations = visualizations
-                    st.session_state.final_size = final_size
-                    st.session_state.original_size = original_size
+                    st.session_state.ix_regression_results = results
+                    st.session_state.ix_regression_completed = True
+                    st.session_state.ix_r_squared = r_squared
+                    st.session_state.ix_r_squared_adj = r_squared_adj
+                    st.session_state.ix_diagnostics = diagnostics
+                    st.session_state.ix_visualizations = visualizations
+                    st.session_state.ix_final_size = final_size
+                    st.session_state.ix_original_size = original_size
                     
                     # Render the regression table
                     status_placeholder.write("Rendering regression table...")
                     table_html = render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, final_size, original_size)
                     components.html(table_html, height=400, scrolling=True)
+
+                    simple = compute_simple_slopes(
+                        work_df, dependent_var, work_independent, results, selected_pairs, work_label_to_var, center_ix
+                    )
+                    st.session_state.ix_simple_slopes = simple
+                    if simple:
+                        st.subheader("Simple slopes")
+                        st.caption(
+                            "Effect of one variable in the pair at low/mean/high values of the other. "
+                            "When the dependent variable is a PISA score domain, the plot uses the first plausible value for the covariance approximation."
+                        )
+                        for block in simple:
+                            if block.get("error"):
+                                st.warning(f"{block['title']}: {block['error']}")
+                                continue
+                            components.html(
+                                render_simple_slope_table(block["title"], block["focal_a"], block["mod_b"], block["rows_a_at_b"]),
+                                height=240,
+                            )
+                            components.html(
+                                render_simple_slope_table(block["title"], block["mod_b"], block["focal_a"], block["rows_b_at_a"]),
+                                height=240,
+                            )
+                            if block.get("plot"):
+                                st.image(f"data:image/png;base64,{block['plot']}")
                     
                     # Display visualizations without headers
                     if visualizations.get('qq_plot'):
@@ -964,19 +1218,36 @@ else:
                     status_placeholder.empty()  # Clear the placeholder after completion
             except Exception as e:
                 st.error(f"Error computing linear regression: {str(e)}")
-                st.session_state.regression_completed = False
-                st.session_state.regression_results = None
-        elif st.session_state.regression_results and st.session_state.regression_completed:
+                st.session_state.ix_regression_completed = False
+                st.session_state.ix_regression_results = None
+        elif st.session_state.ix_regression_results and st.session_state.ix_regression_completed:
             if independent_vars and dependent_var:
-                results = st.session_state.regression_results
-                r_squared = st.session_state.get('r_squared', np.nan)
-                r_squared_adj = st.session_state.get('r_squared_adj', np.nan)
-                diagnostics = st.session_state.get('diagnostics', {})
-                visualizations = st.session_state.get('visualizations', {})
-                final_size = st.session_state.get('final_size', 0)
-                original_size = st.session_state.get('original_size', 0)
+                results = st.session_state.ix_regression_results
+                r_squared = st.session_state.get('ix_r_squared', np.nan)
+                r_squared_adj = st.session_state.get('ix_r_squared_adj', np.nan)
+                diagnostics = st.session_state.get('ix_diagnostics', {})
+                visualizations = st.session_state.get('ix_visualizations', {})
+                final_size = st.session_state.get('ix_final_size', 0)
+                original_size = st.session_state.get('ix_original_size', 0)
                 table_html = render_regression_table(dependent_var_label, results, r_squared, r_squared_adj, diagnostics, final_size, original_size)
                 components.html(table_html, height=400, scrolling=True)
+                simple = st.session_state.get("ix_simple_slopes") or []
+                if simple:
+                    st.subheader("Simple slopes")
+                    for block in simple:
+                        if block.get("error"):
+                            st.warning(f"{block['title']}: {block['error']}")
+                            continue
+                        components.html(
+                            render_simple_slope_table(block["title"], block["focal_a"], block["mod_b"], block["rows_a_at_b"]),
+                            height=240,
+                        )
+                        components.html(
+                            render_simple_slope_table(block["title"], block["mod_b"], block["focal_a"], block["rows_b_at_a"]),
+                            height=240,
+                        )
+                        if block.get("plot"):
+                            st.image(f"data:image/png;base64,{block['plot']}")
                 
                 # Display visualizations without headers
                 if visualizations.get('qq_plot'):

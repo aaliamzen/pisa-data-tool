@@ -39,6 +39,10 @@ if 'W_FSTUWT' not in df.columns:
     st.stop() 
     
 
+label = st.session_state.get("dataset_label")
+if label:
+    st.info(f"Dataset: {label}")
+
 #Variable Label Mapping and User Selection
 
 var_code_to_label = {code: label for code, label in variable_labels.items() if code in visible_columns}  
