@@ -235,7 +235,7 @@ def compute_brr_se_correlation(cont_var, cat_var, w, replicate_weight_cols, corr
         
         # Convert to array and compute standard error
         replicate_corrs = np.array(replicate_corrs)
-        se = np.sqrt((1 / 80) * np.sum((replicate_corrs - main_corr) ** 2))
+        se = np.sqrt((1 / 20) * np.sum((replicate_corrs - main_corr) ** 2))
         return se
     except Exception as e:
         st.error(f"Error in compute_brr_se_correlation: {str(e)}")
@@ -508,7 +508,8 @@ def render_correlation_matrix(selected_labels, corr_matrix, p_matrix, corr_types
         correlation_types_note += f"Number of cases analyzed (after listwise deletion): {valid_cases:,} out of {original_sample_size:,} ({percentage:.1f}% of original sample). "
     else:
         correlation_types_note += "Case information unavailable. "
-    correlation_types_note += "Significance: *p < 0.01, **p < 0.001."
+    correlation_types_note += "Significance: *p < 0.01, **p < 0.001. "
+    correlation_types_note += "Score domains (Mathematics, Reading, Science) use 10 plausible values combined with Rubin's rules; other variables are single observed measures."
     
     full_html = html_content.replace("{{header_row}}", header_row).replace("{{data_rows}}", data_rows).replace("{{correlation_types_note}}", correlation_types_note)
     return full_html
@@ -529,6 +530,15 @@ if 'correlation_matrix_used_brr' not in st.session_state:
 
 # Streamlit UI
 st.title("Correlational Analysis")
+st.markdown(
+    """
+**How to use this page**
+- Select two or more variables. Mathematics / Reading / Science score use all 10 plausible values and Rubin's rules; other variables are single observed measures.
+- Click **Run Analysis**. Point estimates use `W_FSTUWT`. Standard errors and *p*-values use Fay BRR (*k* = 0.5) on 80 replicate weights.
+- The matrix is rounded to 2 decimal places. Superscript letters mark the correlation type (Pearson, point-biserial, Cramér's V).
+- Significance: *p* < .01, **p* < .001. The note under the table includes listwise *N*.
+"""
+)
 label = st.session_state.get("dataset_label")
 if label:
     st.info(f"Dataset: {label}")
@@ -652,6 +662,23 @@ else:
             # Determine if the variable is categorical
             is_cat, is_bin, unique_count = is_categorical(df[var_code])
             variable_types[var_code] = (is_cat, is_bin, unique_count)
+
+    if selected_domains:
+        pv_bits = []
+        for d in selected_domains:
+            n_pv = len(pv_domains.get(d, []))
+            pv_bits.append(
+                "{0} ({1}, {2} plausible values)".format(
+                    domain_to_label.get(d, d), d, n_pv
+                )
+            )
+        st.info(
+            "Score domains will use all plausible values and Rubin's rules: "
+            + "; ".join(pv_bits)
+            + ". Other selected variables are single observed scales."
+        )
+    elif selected_var_labels:
+        st.caption("No score domain selected. This run will not use plausible values.")
     
     run_analysis = st.button("Run Analysis", key="run_correlation_matrix")
     
@@ -660,10 +687,34 @@ else:
             if 'W_FSTUWT' not in df.columns:
                 st.error("Final student weight (W_FSTUWT) not found in the dataset.")
             else:
-                # Check for replicate weights availability
+                # Replicate weights are required (Fay BRR, k=0.5)
                 replicate_weight_cols = [f"W_FSTURWT{i}" for i in range(1, 81)]
                 missing_weights = [col for col in replicate_weight_cols if col not in df.columns]
-                st.session_state.correlation_matrix_used_brr = len(missing_weights) == 0  # Use BRR if no replicate weights are missing
+                if missing_weights:
+                    st.error(
+                        "Replicate weights W_FSTURWT1-W_FSTURWT80 are required. "
+                        "Missing {0} column(s), e.g. {1}. "
+                        "Re-export the file with student replicate weights.".format(
+                            len(missing_weights), missing_weights[:5]
+                        )
+                    )
+                    st.stop()
+                st.session_state.correlation_matrix_used_brr = True
+                st.caption("Using 80 BRR replicate weights (Fay k = 0.5).")
+                if selected_domains:
+                    st.caption(
+                        "Plausible values: "
+                        + ", ".join(
+                            "{0} x {1} PVs".format(
+                                domain_to_label.get(d, d),
+                                len(pv_domains.get(d, [])),
+                            )
+                            for d in selected_domains
+                        )
+                        + ". Combined with Rubin's rules."
+                    )
+                else:
+                    st.caption("No plausible-value domains in this run.")
                 
                 # Initialize correlation and p-value matrices
                 n_vars = len(selected_var_labels)
@@ -1008,11 +1059,4 @@ else:
     else:
         st.write("Please select at least two variables and click 'Run Analysis' to compute the correlation matrix.")
 
-# Instructions section
-st.header("Instructions")
-st.markdown("""
-- **Select Variables**: Choose two or more variables (domains or numeric variables) from the dropdown menus. Plausible value domains (e.g., Mathematics score, Reading score) will use all 10 plausible values for analysis.
-- **Run Analysis**: Click "Run Analysis" to perform the weighted correlation matrix analysis. Analyses involving plausible values will be combined using Rubin's rules.
-- **View Results**: Results are displayed in an APA-style table with correlations rounded to 2 decimal places. Superscript letters indicate the correlation type for each pair, explained in the note below the table. The note also includes the number of cases analyzed after listwise deletion and the percentage relative to the original sample size.
-- **Navigate**: Use the sidebar to switch between different analysis types or return to the main page to upload a new dataset.
-""")
+# Instructions are shown under the page title.

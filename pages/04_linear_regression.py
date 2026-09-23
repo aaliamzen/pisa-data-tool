@@ -183,7 +183,7 @@ def compute_brr_se_regression(x, y, replicate_weights, reg_data, progress_bar=No
                 brr_se.append(np.nan)
             else:
                 replicate_coefs_array = np.array(replicate_coefs[idx])
-                se = np.sqrt((1 / 80) * np.sum((replicate_coefs_array - main_coef) ** 2))
+                se = np.sqrt((1 / 20) * np.sum((replicate_coefs_array - main_coef) ** 2))
                 brr_se.append(se)
             
             # Standardized coefficient SE
@@ -191,7 +191,7 @@ def compute_brr_se_regression(x, y, replicate_weights, reg_data, progress_bar=No
                 brr_se_std.append(np.nan)
             else:
                 replicate_std_coefs_array = np.array(replicate_std_coefs[idx])
-                se_std = np.sqrt((1 / 80) * np.sum((replicate_std_coefs_array - main_std_coef) ** 2))
+                se_std = np.sqrt((1 / 20) * np.sum((replicate_std_coefs_array - main_std_coef) ** 2))
                 brr_se_std.append(se_std)
         
         return (brr_se, brr_se_std)
@@ -369,7 +369,7 @@ def compute_linear_regression_with_pvs(df, dependent_var, independent_vars, weig
             if use_brr:
                 if status_placeholder:
                     status_placeholder.write("Calculating standard errors using replicate weights...")
-                brr_se, brr_se_std = compute_brr_se_regression(X, y, replicate_weights, data, independent_vars)
+                brr_se, brr_se_std = compute_brr_se_regression(X, y, replicate_weights, data, None, independent_vars)
                 # Update results with BRR standard errors and recompute p-values
                 updated_results = []
                 for idx, (var, coef, std_coef, _, _) in enumerate(results):
@@ -676,9 +676,7 @@ def render_regression_table(dependent_var_label, results, r_squared, r_squared_a
             </tr>
             {{data_rows}}
         </table>
-        <div class="reg-table-note"><i>Note.</i> <i>R²</i> = {{r_squared}}, Adjusted <i>R²</i> = {{r_squared_adj}}</div>
-        <div class="reg-table-note">Model: <i>F</i>({{df_model}}, {{df_resid}}) = {{f_stat}}, <i>p</i> = {{f_pvalue}}</div>
-        <div class="reg-table-note">Assumptions: Anderson-Darling: <i>A²</i> = {{ad_stat}}, Normality Rejected at 5% = {{ad_reject}}; Breusch-Pagan: <i>LM</i> = {{bp_lm_stat}}, <i>p</i> = {{bp_pvalue}}; Max <i>VIF</i> = {{max_vif}}</div>
+        <div class="reg-table-note"><i>Note.</i> Coefficient <i>B</i>, <i>SE</i> and <i>p</i> use Fay BRR (<i>k</i> = 0.5) and, for score domains, Rubin's rules. <i>R²</i> = {{r_squared}}, Adjusted <i>R²</i> = {{r_squared_adj}} (weighted OLS fit). Max <i>VIF</i> = {{max_vif}}. *<i>p</i> &lt; .01. **<i>p</i> &lt; .001.</div>
         <div class="reg-table-note">Sample Size: Final N = {{final_size}} ({{percent_retained}}% of original N = {{original_size}} after listwise deletion)</div>
     </div>
     """
@@ -688,7 +686,7 @@ def render_regression_table(dependent_var_label, results, r_squared, r_squared_a
         std_coef_display = f"{std_coef:.2f}" if not np.isnan(std_coef) else "-"
         se_display = f"{se:.2f}" if not np.isnan(se) else "-"
         p_display = "< .001" if p_value < 0.001 else f"{p_value:.2f}" if not np.isnan(p_value) else "-"
-        sig_display = "**" if p_value < 0.01 else "*" if p_value < 0.05 else "" if not np.isnan(p_value) else ""
+        sig_display = "**" if p_value < 0.001 else "*" if p_value < 0.01 else "" if not np.isnan(p_value) else ""
         missing_display = f"{missing_pct:.1f}" if missing_pct is not None and not np.isnan(missing_pct) else "-"
         row_class = "reg-table-last-row" if idx == len(results) - 1 else ""
         row = f"""
@@ -752,6 +750,16 @@ if 'regression_completed' not in st.session_state:
 
 # Streamlit UI
 st.title("Linear Regression Analysis (OLS)")
+st.markdown(
+    """
+**How to use this page**
+- Choose a dependent variable (a score domain or a scale), then predictors and optional covariates.
+- Mathematics / Reading / Science score as Y uses 10 plausible values and Rubin's rules.
+- Click **Run Analysis**. Coefficients, SEs and *p*-values use Fay BRR (*k* = 0.5). *R*² and VIF come from the weighted OLS fit and are not design-based.
+- Significance: *p* < .01, **p* < .001. Residual plots are informal checks only.
+- Do not put two score domains in the same model (the PV loop is built for one domain).
+"""
+)
 label = st.session_state.get("dataset_label")
 if label:
     st.info(f"Dataset: {label}")
@@ -914,6 +922,29 @@ else:
         
         # Combine covariates and predictors for the regression
         independent_vars = covariates + predictors
+
+        pv_roles = []
+        if dependent_var_label in label_to_domain:
+            d = label_to_domain[dependent_var_label]
+            pv_roles.append(
+                "{0} as outcome ({1} PVs)".format(
+                    dependent_var_label, len(pv_domains.get(d, []))
+                )
+            )
+        for lab in predictor_labels + covariate_labels:
+            if lab in label_to_domain:
+                d = label_to_domain[lab]
+                pv_roles.append(
+                    "{0} as predictor ({1} PVs)".format(lab, len(pv_domains.get(d, [])))
+                )
+        if pv_roles:
+            st.info(
+                "Score domains will use all plausible values and Rubin's rules: "
+                + "; ".join(pv_roles)
+                + "."
+            )
+        elif dependent_var_label:
+            st.caption("No score domain selected. This run will not use plausible values.")
         
         run_analysis = st.button("Run Analysis", key="run_regression")
         
@@ -925,7 +956,31 @@ else:
                     # Check for replicate weights availability
                     replicate_weight_cols = [f"W_FSTURWT{i}" for i in range(1, 81)]
                     missing_weights = [col for col in replicate_weight_cols if col not in df.columns]
-                    use_brr = len(missing_weights) == 0
+                    if missing_weights:
+                        st.error(
+                            "Replicate weights W_FSTURWT1-W_FSTURWT80 are required. "
+                            "Missing {0} column(s), e.g. {1}. "
+                            "Re-export the file with student replicate weights.".format(
+                                len(missing_weights), missing_weights[:5]
+                            )
+                        )
+                        st.stop()
+                    use_brr = True
+                    st.caption("Using 80 BRR replicate weights (Fay k = 0.5).")
+                    pv_used = []
+                    if dependent_var_label in label_to_domain:
+                        pv_used.append(dependent_var_label + " (outcome)")
+                    for lab in predictor_labels + covariate_labels:
+                        if lab in label_to_domain:
+                            pv_used.append(lab)
+                    if pv_used:
+                        st.caption(
+                            "Plausible values: "
+                            + ", ".join(pv_used)
+                            + ". Combined with Rubin's rules (10 PVs)."
+                        )
+                    else:
+                        st.caption("No score domain in this model. Plausible values are not used.")
                     
                     # Create a placeholder for status messages
                     status_placeholder = st.empty()
@@ -951,6 +1006,7 @@ else:
                     components.html(table_html, height=400, scrolling=True)
                     
                     # Display visualizations without headers
+                    st.caption("Residual plots below are from the single weighted OLS fit. They are informal checks, not design-based tests.")
                     if visualizations.get('qq_plot'):
                         st.image(f"data:image/png;base64,{visualizations['qq_plot']}")
                     
