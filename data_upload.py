@@ -303,7 +303,7 @@ st.markdown("---")
 
 # Sidebar for data selection
 st.sidebar.header("Data Selection")
-uploaded_file = st.sidebar.file_uploader("Upload PISA Data File (.sav)", type=["sav"])
+uploaded_file = st.sidebar.file_uploader("Upload COUNTRY Specific PISA Data File (.sav)", type=["sav"])
 show_value_labels = st.sidebar.checkbox("Show Value Labels", value=False)
 
 # Load data and update session state
